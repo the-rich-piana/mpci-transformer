@@ -1,0 +1,6 @@
+.vscode/
+/ibl_env/*
+*.csv
+context/
+*.pyc
+*.h5
