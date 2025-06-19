@@ -258,7 +258,7 @@ class MesoscopeSession(BaseModel):
         print(f"Shape: {activity_matrix.shape} (time_points x neurons)")
         print(f"File size: {os.path.getsize(path) / (1024**2):.2f} MB")
     
-    def plot_neurons_raster(self, time_window: float = 300, threshold: float = 0.2):
+    def plot_binary_activity_heatmap(self, time_window: float = 300, threshold: float = 0.2):
         """Plot raster of neural activity for all FOVs"""
         import matplotlib.pyplot as plt
         
