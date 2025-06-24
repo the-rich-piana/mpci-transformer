@@ -5,3 +5,4 @@ context/
 *.pyc
 *.h5
 lightning_logs/
+*.safetensors
