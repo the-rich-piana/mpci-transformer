@@ -77,6 +77,7 @@ class MesoscopeSession(BaseModel):
     subject: str
     date: str
     duration_hours: float
+    raw_activity: bool
     task_protocol: str
     fovs: Dict[str, FOVData] = Field(default_factory=dict)
     
@@ -99,7 +100,7 @@ class MesoscopeSession(BaseModel):
         return sum(fov.n_neurons for fov in self.fovs.values())
         
     @classmethod
-    def from_eid(cls, one: ONE, eid: str, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
+    def from_eid(cls, one: ONE, eid: str, raw_activity: bool, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
         """Load mesoscope session data from experiment ID"""
         # Get session details
         session_info = one.get_details(eid, full=True)
@@ -107,6 +108,7 @@ class MesoscopeSession(BaseModel):
         # Create session object
         session = cls(
             eid=eid,
+            raw_activity=raw_activity,
             subject=session_info.get('subject', 'unknown'),
             date=str(session_info.get('start_time', 'unknown')),
             duration_hours=_calculate_duration(session_info),
@@ -133,14 +135,14 @@ class MesoscopeSession(BaseModel):
         # Load data for each FOV
         for collection in fov_collections:
             fov_name = collection.split('/')[-1]
-            fov_data = _load_fov_data(one, eid, collection)
+            fov_data = _load_fov_data(one, eid, raw_activity, collection)
             if fov_data is not None:
                 session.fovs[fov_name] = fov_data
         
         return session
     
     @classmethod
-    def from_csv(cls, one: ONE, csv_path: str, index: int, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
+    def from_csv(cls, one: ONE, csv_path: str, index: int, raw_activity: bool = False, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
         """Load mesoscope session from a CSV file containing session list"""
         import pandas as pd
         
@@ -150,9 +152,8 @@ class MesoscopeSession(BaseModel):
         # Get session at the specified index
         selected_session = sessions_df.iloc[index]
         eid = selected_session['eid']
-        
         # Load the session
-        return cls.from_eid(one, eid, max_fovs)
+        return cls.from_eid(one, eid, raw_activity, max_fovs)
     
     def get_activity_matrix(self, time_window: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
         """Get a combined matrix of all neuron activity across all FOVs
@@ -377,11 +378,14 @@ def _calculate_duration(session_info) -> float:
     
     return 0.0
 
-def _load_fov_data(one: ONE, eid: str, collection: str) -> Optional[FOVData]:
+def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> Optional[FOVData]:
     """Load data for a single FOV"""
     try:
         # Load the key datasets
-        roi_activity = one.load_dataset(eid, 'mpci.ROIActivityDeconvolved', collection=collection)
+        if raw_activity:
+            roi_activity = one.load_dataset(eid, 'mpci.ROIActivityF', collection=collection)        
+        else:
+            roi_activity = one.load_dataset(eid, 'mpci.ROIActivityDeconvolved', collection=collection)
         timestamps = one.load_dataset(eid, 'mpci.times', collection=collection)
         bad_frames = one.load_dataset(eid, 'mpci.badFrames', collection=collection)
         frame_qc = one.load_dataset(eid, 'mpci.mpciFrameQC', collection=collection)
