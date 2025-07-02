@@ -155,6 +155,59 @@ class MesoscopeSession(BaseModel):
         # Load the session
         return cls.from_eid(one, eid, raw_activity, max_fovs)
     
+    
+    @classmethod
+    def load_activity_matrix(cls, path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Union[str, float, int]]]:
+        """Load activity matrix from HDF5 file
+        
+        Args:
+            path (str): Path to the HDF5 file
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray, Dict]: (activity_matrix, timestamps, metadata)
+            - activity_matrix: Neural activity matrix [time_points, neurons]
+            - timestamps: Time points [time_points]
+            - metadata: Dictionary containing session metadata
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"HDF5 file not found: {path}")
+        
+        with h5py.File(path, 'r') as f:
+            # Load the activity matrix and timestamps
+            activity_matrix = f['activity_matrix'][:]
+            timestamps = f['timestamps'][:]
+            
+            # Load metadata
+            metadata = {}
+            for key in f.attrs.keys():
+                value = f.attrs[key]
+                # Handle different data types
+                if isinstance(value, bytes):
+                    metadata[key] = value.decode('utf-8')
+                elif isinstance(value, np.ndarray) and value.size == 1:
+                    metadata[key] = value.item()
+                else:
+                    metadata[key] = value
+        
+        print(f"Activity matrix loaded from {path}")
+        print(f"Shape: {activity_matrix.shape} (time_points x neurons)")
+        print(f"Metadata: {metadata}")
+        
+        return activity_matrix, timestamps, metadata    
+    @classmethod
+    def load_session_from_hdf5(cls, path: str) -> Tuple[np.ndarray, np.ndarray, str]:
+        """Convenience method to load just the essential data from HDF5
+        
+        Args:
+            path (str): Path to the HDF5 file
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray, str]: (activity_matrix, timestamps, eid)
+        """
+        activity_matrix, timestamps, metadata = cls.load_activity_matrix(path)
+        eid = metadata.get('eid', 'unknown')
+        return activity_matrix, timestamps, eid
+    
     def get_activity_matrix(self, time_window: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
         """Get a combined matrix of all neuron activity across all FOVs
         
@@ -202,7 +255,7 @@ class MesoscopeSession(BaseModel):
         return np.array([]), common_timestamps
     
     def save_activity_matrix(self, path: str, time_window: Optional[float] = None, compression: str = 'gzip'):
-        """Save the combined activity matrix to an HDF5 file
+        """Save the combined activity matrix to an HDF5 file as a simple time x neurons matrix
         
         Args:
             path (str): Path to save the HDF5 file (should end with .h5 or .hdf5)
@@ -220,7 +273,7 @@ class MesoscopeSession(BaseModel):
         
         # Save to HDF5 file
         with h5py.File(path, 'w') as f:
-            # Save the main activity matrix
+            # Save the main activity matrix as a simple time x neurons matrix
             f.create_dataset('activity_matrix', 
                             data=activity_matrix, 
                             compression=compression,
@@ -231,29 +284,15 @@ class MesoscopeSession(BaseModel):
                             data=timestamps, 
                             compression=compression)
             
-            # Save metadata
-            metadata_group = f.create_group('metadata')
-            metadata_group.attrs['eid'] = self.eid
-            metadata_group.attrs['subject'] = self.subject
-            metadata_group.attrs['date'] = self.date
-            metadata_group.attrs['duration_hours'] = self.duration_hours
-            metadata_group.attrs['task_protocol'] = self.task_protocol
-            metadata_group.attrs['n_fovs'] = self.n_fovs
-            metadata_group.attrs['n_total_neurons'] = self.n_total_neurons
-            metadata_group.attrs['time_window'] = time_window if time_window is not None else "full_session"
-            metadata_group.attrs['shape_description'] = "activity_matrix: [time_points, neurons], timestamps: [time_points]"
-            
-            # Save FOV information
-            fov_group = f.create_group('fov_info')
-            neuron_count = 0
-            for fov_name, fov in self.fovs.items():
-                fov_subgroup = fov_group.create_group(fov_name)
-                fov_subgroup.attrs['collection'] = fov.collection
-                fov_subgroup.attrs['n_neurons'] = fov.n_neurons
-                fov_subgroup.attrs['n_rois'] = fov.n_rois
-                fov_subgroup.attrs['neuron_start_index'] = neuron_count
-                fov_subgroup.attrs['neuron_end_index'] = neuron_count + fov.n_neurons
-                neuron_count += fov.n_neurons
+            # Save minimal metadata
+            f.attrs['eid'] = self.eid
+            f.attrs['subject'] = self.subject
+            f.attrs['date'] = self.date
+            f.attrs['duration_hours'] = self.duration_hours
+            f.attrs['task_protocol'] = self.task_protocol
+            f.attrs['n_total_neurons'] = self.n_total_neurons
+            f.attrs['time_window'] = time_window if time_window is not None else "full_session"
+            f.attrs['shape_description'] = "activity_matrix: [time_points, neurons], timestamps: [time_points]"
         
         print(f"Activity matrix saved to {path}")
         print(f"Shape: {activity_matrix.shape} (time_points x neurons)")
@@ -377,6 +416,7 @@ def _calculate_duration(session_info) -> float:
             pass
     
     return 0.0
+
 
 def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> Optional[FOVData]:
     """Load data for a single FOV"""
