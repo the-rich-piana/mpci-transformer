@@ -10,6 +10,7 @@ class FOVData(BaseModel):
     """Data for a single Field of View (FOV)"""
     fov_name: str
     collection: str
+    neuropil_activity: Optional[np.ndarray] = Field(None, description="Neuropil activity matrix [frames, ROIs]")    
     roi_activity: np.ndarray = Field(..., description="ROI activity matrix [frames, ROIs]")
     timestamps: np.ndarray = Field(..., description="Timestamps for each frame")
     bad_frames: np.ndarray = Field(..., description="Boolean array marking bad frames")
@@ -70,6 +71,64 @@ class FOVData(BaseModel):
         
         # If no ROI types available, return empty arrays
         return np.array([]).reshape(filtered_activity.shape[0], 0), filtered_timestamps, np.array([])
+    
+    def compute_dff(self, neucoeff: float = 0.7) -> np.ndarray:
+        """
+        Compute ΔF/F using Suite2p method: F - neucoeff * Fneu
+        
+        Args:
+            neucoeff: Neuropil coefficient (default 0.7 as per Suite2p)
+            
+        Returns:
+            ΔF/F matrix [frames, ROIs]
+        """
+        if self.neuropil_activity is None:
+            raise ValueError(f"Neuropil activity not available for {self.fov_name}")
+            
+        # Suite2p ΔF/F calculation
+        f_corrected = self.roi_activity - neucoeff * self.neuropil_activity
+        
+        # Compute baseline (using simple percentile method)
+        # You can make this more sophisticated later
+        f0 = np.percentile(f_corrected, 10, axis=0, keepdims=True)
+        f0 = np.maximum(f0, 1.0)  # Avoid division by very small numbers
+        
+        # Calculate ΔF/F
+        dff = (f_corrected - f0) / f0
+        
+        return dff
+    
+    def get_dff_activity(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
+        """Get ΔF/F activity filtered by good frames and time window"""
+        # Compute ΔF/F
+        dff_activity = self.compute_dff(neucoeff=neucoeff)
+        
+        # Filter by good frames
+        good_mask = self.good_frame_mask
+        filtered_dff = dff_activity[good_mask, :]
+        filtered_timestamps = self.timestamps[good_mask]
+        
+        # Apply time window if specified
+        if time_window is not None:
+            time_limit = filtered_timestamps[0] + time_window
+            time_mask = filtered_timestamps <= time_limit
+            filtered_dff = filtered_dff[time_mask, :]
+            filtered_timestamps = filtered_timestamps[time_mask]
+            
+        return filtered_dff, filtered_timestamps
+    
+    def get_neuron_dff_activity(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get ΔF/F activity only for neurons, filtered by good frames and time window"""
+        filtered_dff, filtered_timestamps = self.get_dff_activity(time_window, neucoeff)
+        
+        # Filter by ROI type
+        if self.roi_types is not None:
+            neuron_mask = np.array(self.roi_types) == 1
+            neuron_dff = filtered_dff[:, neuron_mask]
+            return neuron_dff, filtered_timestamps, neuron_mask
+        
+        # If no ROI types available, return empty arrays
+        return np.array([]).reshape(filtered_dff.shape[0], 0), filtered_timestamps, np.array([])
 
 class MesoscopeSession(BaseModel):
     """Data for a complete mesoscope session with multiple FOVs"""
@@ -80,6 +139,9 @@ class MesoscopeSession(BaseModel):
     raw_activity: bool
     task_protocol: str
     fovs: Dict[str, FOVData] = Field(default_factory=dict)
+    stimOn_times: np.ndarray
+    feedback_times: np.ndarray
+    wheel_position: np.ndarray
     
     class Config:
         arbitrary_types_allowed = True
@@ -105,6 +167,13 @@ class MesoscopeSession(BaseModel):
         # Get session details
         session_info = one.get_details(eid, full=True)
         
+        # Load behavioral data
+        trials = one.load_object(eid, 'trials')
+        stimOn_times = trials['stimOn_times']
+        feedback_times = trials['feedback_times']
+        wheel = one.load_object(eid, 'wheel')
+        wheel_position = wheel['position']
+        
         # Create session object
         session = cls(
             eid=eid,
@@ -112,7 +181,10 @@ class MesoscopeSession(BaseModel):
             subject=session_info.get('subject', 'unknown'),
             date=str(session_info.get('start_time', 'unknown')),
             duration_hours=_calculate_duration(session_info),
-            task_protocol=session_info.get('task_protocol', '')
+            task_protocol=session_info.get('task_protocol', ''),
+            stimOn_times=stimOn_times,
+            feedback_times=feedback_times,
+            wheel_position=wheel_position
         )
         
         # Find FOV collections
@@ -142,7 +214,7 @@ class MesoscopeSession(BaseModel):
         return session
     
     @classmethod
-    def from_csv(cls, one: ONE, csv_path: str, index: int, raw_activity: bool = False, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
+    def from_csv(cls, one: ONE, csv_path: str, index: int, raw_activity: bool = True, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
         """Load mesoscope session from a CSV file containing session list"""
         import pandas as pd
         
@@ -298,6 +370,105 @@ class MesoscopeSession(BaseModel):
         print(f"Shape: {activity_matrix.shape} (time_points x neurons)")
         print(f"File size: {os.path.getsize(path) / (1024**2):.2f} MB")
     
+    def get_dff_activity_matrix(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get a combined ΔF/F matrix of all neuron activity across all FOVs
+        
+        Args:
+            time_window: Time window to extract (in seconds)
+            neucoeff: Neuropil coefficient for ΔF/F calculation
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (dff_matrix, timestamps)
+        """
+        # List to store neuron ΔF/F from each FOV
+        all_neuron_dff = []
+        common_timestamps = None
+        
+        # Process each FOV
+        for fov_name, fov in self.fovs.items():
+            # Get neuron ΔF/F activity
+            neuron_dff, timestamps, _ = fov.get_neuron_dff_activity(time_window, neucoeff)
+            
+            # Skip if no neurons
+            if neuron_dff.shape[1] == 0:
+                continue
+                
+            # Store the neuron ΔF/F
+            all_neuron_dff.append(neuron_dff)
+            
+            # Store the timestamps
+            if common_timestamps is None and timestamps.size > 0:
+                common_timestamps = timestamps
+        
+        # If no valid FOVs, return empty arrays
+        if not all_neuron_dff or common_timestamps is None:
+            return np.array([]), np.array([])
+        
+        # Verify all activities have the same number of time points
+        expected_time_points = all_neuron_dff[0].shape[0]
+        all_neuron_dff = [act for act in all_neuron_dff 
+                         if act.shape[0] == expected_time_points]
+        
+        # Combine all neuron activities into a single matrix
+        if all_neuron_dff:
+            # Concatenate along the neuron dimension (axis=1)
+            combined_dff = np.concatenate(all_neuron_dff, axis=1)
+            return combined_dff, common_timestamps
+        
+        return np.array([]), common_timestamps
+    
+    def save_dff_activity_matrix(self, path: str, time_window: Optional[float] = None, 
+                                neucoeff: float = 0.7, compression: str = 'gzip'):
+        """
+        Save the combined ΔF/F activity matrix to an HDF5 file
+        
+        Args:
+            path: Path to save the HDF5 file
+            time_window: Time window to extract data for (in seconds)
+            neucoeff: Neuropil coefficient for ΔF/F calculation
+            compression: Compression method for HDF5
+        """
+        dff_matrix, timestamps = self.get_dff_activity_matrix(time_window, neucoeff)
+        
+        if dff_matrix.size == 0:
+            print("Warning: No ΔF/F data to save!")
+            return
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        
+        # Save to HDF5 file
+        with h5py.File(path, 'w') as f:
+            # Save the main ΔF/F matrix
+            f.create_dataset('dff_matrix', 
+                            data=dff_matrix, 
+                            compression=compression,
+                            chunks=True)
+            
+            # Save timestamps
+            f.create_dataset('timestamps', 
+                            data=timestamps, 
+                            compression=compression)
+            
+            # Save metadata
+            f.attrs['eid'] = self.eid
+            f.attrs['subject'] = self.subject
+            f.attrs['date'] = self.date
+            f.attrs['duration_hours'] = self.duration_hours
+            f.attrs['task_protocol'] = self.task_protocol
+            f.attrs['neucoeff'] = neucoeff
+            f.attrs['calculation_method'] = 'suite2p_style'
+            f.attrs['formula'] = 'dF/F = F - neucoeff*Fneu'
+            f.attrs['n_total_neurons'] = self.n_total_neurons
+            f.attrs['time_window'] = time_window if time_window is not None else "full_session"
+            f.attrs['shape_description'] = "dff_matrix: [time_points, neurons], timestamps: [time_points]"
+            
+        print(f"ΔF/F matrix saved to {path}")
+        print(f"Shape: {dff_matrix.shape} (time_points x neurons)")
+        print(f"ΔF/F range: {dff_matrix.min():.3f} to {dff_matrix.max():.3f}")
+        print(f"File size: {os.path.getsize(path) / (1024**2):.2f} MB")
+    
     def plot_binary_activity_heatmap(self, time_window: float = 300, threshold: float = 0.2):
         """Plot raster of neural activity for all FOVs"""
         import matplotlib.pyplot as plt
@@ -426,6 +597,14 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
             roi_activity = one.load_dataset(eid, 'mpci.ROIActivityF', collection=collection)        
         else:
             roi_activity = one.load_dataset(eid, 'mpci.ROIActivityDeconvolved', collection=collection)
+        
+        # Load neuropil activity
+        neuropil_activity = None
+        try:
+            neuropil_activity = one.load_dataset(eid, 'mpci.ROINeuropilActivityF', collection=collection)
+        except Exception as e:
+            print(f"Warning: Could not load neuropil activity for {collection}: {e}")
+            
         timestamps = one.load_dataset(eid, 'mpci.times', collection=collection)
         bad_frames = one.load_dataset(eid, 'mpci.badFrames', collection=collection)
         frame_qc = one.load_dataset(eid, 'mpci.mpciFrameQC', collection=collection)
@@ -450,6 +629,7 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
             fov_name=fov_name,
             collection=collection,
             roi_activity=roi_activity,
+            neuropil_activity=neuropil_activity,
             timestamps=timestamps,
             bad_frames=bad_frames,
             frame_qc=frame_qc,
