@@ -15,9 +15,6 @@ class FOVData(BaseModel):
     timestamps: np.ndarray = Field(..., description="Timestamps for each frame")
     bad_frames: np.ndarray = Field(..., description="Boolean array marking bad frames")
     frame_qc: np.ndarray = Field(..., description="QC values for frames")
-    feedback_times: np.ndarray = Field(..., description='feedback_times')
-    stimOn_times: np.ndarray = Field(..., description='stimOn_times')
-    wheel_position: np.ndarray= Field(..., description='_ibl_wheel.position')    
     roi_types: Optional[np.ndarray] = Field(None, description="Types of ROIs (1=neuron)")
     brain_locations: Optional[np.ndarray] = Field(None, description="Brain locations for ROIs")
     
@@ -611,9 +608,7 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
         timestamps = one.load_dataset(eid, 'mpci.times', collection=collection)
         bad_frames = one.load_dataset(eid, 'mpci.badFrames', collection=collection)
         frame_qc = one.load_dataset(eid, 'mpci.mpciFrameQC', collection=collection)
-        stimOn_times = one.load_dataset(eid, 'stimOn_times', collection=collection)
-        feedback_times = one.load_dataset(eid, 'feedback_times', collection=collection)
-        wheel_position = one.load_data(eid,'_ibl_wheel.position', collection=collection)
+        
         # Try to load ROI types
         roi_types = None
         try:
@@ -639,10 +634,7 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
             bad_frames=bad_frames,
             frame_qc=frame_qc,
             roi_types=roi_types,
-            brain_locations=brain_locations,
-            stimOn_times=stimOn_times,
-            feedback_times=feedback_times,
-            wheel_position=wheel_position,
+            brain_locations=brain_locations
         )
     except Exception as e:
         print(f"Error loading FOV data for {collection}: {str(e)}")
