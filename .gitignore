@@ -6,3 +6,4 @@ context/
 *.h5
 lightning_logs/
 *.safetensors
+IBL_install.py

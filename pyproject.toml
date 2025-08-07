@@ -1,0 +1,68 @@
+[project]
+name = "mpci-transformer"
+version = "0.1.0"
+description = "Neural time series forecasting with transformer models on mesoscope calcium imaging data"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["neuroscience", "time-series", "transformers", "calcium-imaging"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "h5py",
+    "pydantic",
+    "jupyter",
+    "ipykernel",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=1.9.0",
+    "transformers",
+    "pytorch-lightning",
+    "scikit-learn",
+    "scipy",
+]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+    "mypy",
+]
+ibl = [
+    "ONE-api",
+    "ibllib",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["utils"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

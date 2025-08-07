@@ -5,6 +5,8 @@ from one.api import ONE
 import numpy.typing as npt
 import h5py
 import os
+import brainbox.behavior.wheel as wh
+
 
 class FOVData(BaseModel):
     """Data for a single Field of View (FOV)"""
@@ -136,12 +138,21 @@ class MesoscopeSession(BaseModel):
     subject: str
     date: str
     duration_hours: float
+    duration_seconds: float
     raw_activity: bool
     task_protocol: str
     fovs: Dict[str, FOVData] = Field(default_factory=dict)
-    stimOn_times: np.ndarray
-    feedback_times: np.ndarray
-    wheel_position: np.ndarray
+    stimOn_times: np.ndarray = Field(..., description="Stimulus onset times")
+    stimOff_times: np.ndarray = Field(..., description="Time in seconds, relative to the session start, of the stimulus offset, as recorded by an external photodiode.")
+    feedback_times: np.ndarray = Field(..., description="Feedback times")
+    wheel_position: np.ndarray = Field(..., description="Wheel position data")
+    response_times: np.ndarray = Field(..., description="Times at  which response was recorded for each trial")
+    contrastLeft: np.ndarray = Field(..., description="The contrast of the stimulus that appears on the left side of the screen (-35º azimuth).  When there is a non-zero contrast on the right, contrastLeft == 0, when there is no contrast on either side (a catch trial), contrastLeft == NaN.")
+    contrastRight: np.ndarray = Field(..., description="The contrast of the stimulus that appears on the right side of the screen (-35º azimuth).  When there is a non-zero contrast on the right, contrastLeft == 0, when there is no contrast on either side (a catch trial), contrastRight == NaN.")
+    feedbackType: np.ndarray = Field(..., description="Feedback type (+1 correct, -1 incorrect)")
+    intervals: np.ndarray = Field(..., description="Trial start/end times [n_trials, 2]")
+    wheel_timestamps: np.ndarray = Field(..., description="Wheel event timestamps (irregular sampling)")
+    aligned_wheel_velocity: Optional[np.ndarray] = Field(None, description="Wheel velocity aligned to neural timestamps")
     
     class Config:
         arbitrary_types_allowed = True
@@ -160,31 +171,90 @@ class MesoscopeSession(BaseModel):
     def n_total_neurons(self) -> int:
         """Get total number of neurons across all FOVs"""
         return sum(fov.n_neurons for fov in self.fovs.values())
+    
+    def get_aligned_wheel_velocity(self, neural_timestamps: np.ndarray) -> np.ndarray:
+        """
+        Get wheel velocity aligned to neural timestamps.
+        Uses 0 velocity where no wheel data exists (no movement).
+        
+        Args:
+            neural_timestamps: Neural activity timestamps to align to
+            
+        Returns:
+            Aligned wheel velocity array matching neural timestamps
+        """
+        from scipy.interpolate import interp1d
+        
+        # Calculate wheel velocity at appropriate frequency
+        Fs = 5  # Match typical neural sampling rate
+        pos, t = wh.interpolate_position(self.wheel_timestamps, self.wheel_position, freq=Fs)
+        vel, acc = wh.velocity_filtered(pos, Fs, corner_frequency=2)
+        
+        # Clip extreme velocity outliers
+        vel_clipped = np.clip(vel, -2.5, 2.5)
+        
+        # Initialize with zeros (no movement = zero velocity)
+        aligned_velocity = np.zeros(len(neural_timestamps))
+        
+        # Find neural timestamps that overlap with wheel recording period
+        wheel_start = t[0]
+        wheel_end = t[-1]
+        
+        # Create mask for neural timestamps within wheel recording period
+        overlap_mask = (neural_timestamps >= wheel_start) & (neural_timestamps <= wheel_end)
+        
+        if np.any(overlap_mask):
+            # Interpolate wheel velocity for overlapping timestamps only
+            interp_func = interp1d(t, vel_clipped, 
+                                  kind='linear', bounds_error=False, fill_value=0)
+            aligned_velocity[overlap_mask] = interp_func(neural_timestamps[overlap_mask])
+        
+        return aligned_velocity
         
     @classmethod
-    def from_eid(cls, one: ONE, eid: str, raw_activity: bool, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
+    def from_eid(cls, one: ONE, eid: str, raw_activity: bool = True, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
         """Load mesoscope session data from experiment ID"""
         # Get session details
         session_info = one.get_details(eid, full=True)
+        print(session_info)
         
-        # Load behavioral data
-        trials = one.load_object(eid, 'trials')
+        # Load trial data
+        trials = one.load_object(eid, 'trials',)
         stimOn_times = trials['stimOn_times']
+        stimOff_times = trials['stimOff_times']
         feedback_times = trials['feedback_times']
+        response_times = trials['response_times']
+        contrastLeft = trials['contrastLeft']
+        contrastRight = trials['contrastRight']
+        feedbackType = trials['feedbackType']
+        intervals = trials['intervals']
+        
+        # Load wheel data
         wheel = one.load_object(eid, 'wheel')
         wheel_position = wheel['position']
+        wheel_timestamps = wheel['timestamps']
         
+        duration_hours, duration_seconds = _calculate_duration(session_info)
         # Create session object
         session = cls(
             eid=eid,
             raw_activity=raw_activity,
             subject=session_info.get('subject', 'unknown'),
             date=str(session_info.get('start_time', 'unknown')),
-            duration_hours=_calculate_duration(session_info),
+            duration_seconds=duration_seconds,
+            duration_hours=duration_hours,
             task_protocol=session_info.get('task_protocol', ''),
             stimOn_times=stimOn_times,
+            stimOff_times=stimOff_times,
             feedback_times=feedback_times,
-            wheel_position=wheel_position
+            wheel_position=wheel_position,
+            wheel_timestamps=wheel_timestamps,
+            response_times=response_times,
+            contrastLeft=contrastLeft,
+            contrastRight=contrastRight,
+            feedbackType=feedbackType,
+            aligned_wheel_velocity=None,
+            intervals=intervals,
         )
         
         # Find FOV collections
@@ -214,19 +284,85 @@ class MesoscopeSession(BaseModel):
         return session
     
     @classmethod
-    def from_csv(cls, one: ONE, csv_path: str, index: int, raw_activity: bool = True, max_fovs: Optional[int] = None) -> 'MesoscopeSession':
-        """Load mesoscope session from a CSV file containing session list"""
-        import pandas as pd
+    def from_preprocessed(cls, path: str) -> 'MesoscopeSession':
+        """Load mesoscope session from preprocessed HDF5 file
         
-        # Load sessions
-        sessions_df = pd.read_csv(csv_path)
+        Args:
+            path (str): Path to the preprocessed HDF5 file
+            
+        Returns:
+            MesoscopeSession: Session object with preprocessed data loaded
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Preprocessed HDF5 file not found: {path}")
         
-        # Get session at the specified index
-        selected_session = sessions_df.iloc[index]
-        eid = selected_session['eid']
-        # Load the session
-        return cls.from_eid(one, eid, raw_activity, max_fovs)
+        with h5py.File(path, 'r') as f:
+            # Load metadata
+            metadata = {}
+            for key in f['metadata'].attrs.keys():
+                value = f['metadata'].attrs[key]
+                if isinstance(value, bytes):
+                    metadata[key] = value.decode('utf-8')
+                else:
+                    metadata[key] = value
+            
+            # Load trial data
+            trial_data = {}
+            if 'trial_data' in f:
+                for key in f['trial_data'].keys():
+                    trial_data[key] = f['trial_data'][key][:]
+            # Create session object with empty FOVs
+            session = cls(
+                eid=metadata['eid'],
+                subject=metadata['subject'], 
+                date=metadata['date'],
+                duration_hours=metadata['duration_hours'],
+                task_protocol=metadata['task_protocol'],
+                duration_seconds=metadata['duration_seconds'],
+                raw_activity=False,  # Preprocessed data is not raw
+                fovs={},  # No FOVs for preprocessed data
+                stimOn_times=trial_data.get('stimOn_times', np.array([])),
+                stimOff_times=trial_data.get('stimOff_times', np.array([])),                
+                feedback_times=trial_data.get('feedback_times', np.array([])),
+                wheel_position=trial_data.get('wheel_position', np.array([])),
+                response_times=trial_data.get('response_times', np.array([])),
+                contrastLeft=trial_data.get('contrastLeft', np.array([])),
+                contrastRight=trial_data.get('contrastRight', np.array([])),
+                feedbackType=trial_data.get('feedbackType', np.array([])),
+                intervals=trial_data.get('intervals', np.array([])),
+                wheel_timestamps=trial_data.get('wheel_timestamps', np.array([])),
+                aligned_wheel_velocity=trial_data.get('aligned_wheel_velocity', np.array([])),
+            )
+            
+            # Store preprocessed data as instance attributes
+            session._processed_data = f['processed_data'][:]
+            session._timestamps = f['timestamps'][:]
+            session._neuron_mask = f['neuron_mask'][:]
+            
+            # Store normalization parameters
+            session._normalization_params = {}
+            if 'normalization' in f:
+                for key in f['normalization'].keys():
+                    session._normalization_params[key] = f['normalization'][key][:]
+                for key in f['normalization'].attrs.keys():
+                    session._normalization_params[key] = f['normalization'].attrs[key]
+        
+        print(f"Preprocessed session loaded from {path}")
+        print(f"Shape: {session._processed_data.shape} (time_points x neurons)")
+        print(f"EID: {session.eid}, Subject: {session.subject}")
+        
+        return session
     
+    def get_preprocessed_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get preprocessed data (only available for sessions loaded from preprocessed files)
+        
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (processed_data, timestamps)
+        """
+        if not hasattr(self, '_processed_data'):
+            raise ValueError("No preprocessed data available. Use from_preprocessed() to load preprocessed sessions.")
+        
+        return self._processed_data, self._timestamps
     
     @classmethod
     def load_activity_matrix(cls, path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Union[str, float, int]]]:
@@ -326,50 +462,6 @@ class MesoscopeSession(BaseModel):
         
         return np.array([]), common_timestamps
     
-    def save_activity_matrix(self, path: str, time_window: Optional[float] = None, compression: str = 'gzip'):
-        """Save the combined activity matrix to an HDF5 file as a simple time x neurons matrix
-        
-        Args:
-            path (str): Path to save the HDF5 file (should end with .h5 or .hdf5)
-            time_window (Optional[float]): Time window to extract data for (in seconds)
-            compression (str): Compression method for HDF5 ('gzip', 'lzf', 'szip', or None)
-        """
-        activity_matrix, timestamps = self.get_activity_matrix(time_window)
-        
-        if activity_matrix.size == 0:
-            print("Warning: No activity data to save!")
-            return
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
-        
-        # Save to HDF5 file
-        with h5py.File(path, 'w') as f:
-            # Save the main activity matrix as a simple time x neurons matrix
-            f.create_dataset('activity_matrix', 
-                            data=activity_matrix, 
-                            compression=compression,
-                            chunks=True)
-            
-            # Save timestamps
-            f.create_dataset('timestamps', 
-                            data=timestamps, 
-                            compression=compression)
-            
-            # Save minimal metadata
-            f.attrs['eid'] = self.eid
-            f.attrs['subject'] = self.subject
-            f.attrs['date'] = self.date
-            f.attrs['duration_hours'] = self.duration_hours
-            f.attrs['task_protocol'] = self.task_protocol
-            f.attrs['n_total_neurons'] = self.n_total_neurons
-            f.attrs['time_window'] = time_window if time_window is not None else "full_session"
-            f.attrs['shape_description'] = "activity_matrix: [time_points, neurons], timestamps: [time_points]"
-        
-        print(f"Activity matrix saved to {path}")
-        print(f"Shape: {activity_matrix.shape} (time_points x neurons)")
-        print(f"File size: {os.path.getsize(path) / (1024**2):.2f} MB")
-    
     def get_dff_activity_matrix(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get a combined ΔF/F matrix of all neuron activity across all FOVs
@@ -418,151 +510,9 @@ class MesoscopeSession(BaseModel):
         
         return np.array([]), common_timestamps
     
-    def save_dff_activity_matrix(self, path: str, time_window: Optional[float] = None, 
-                                neucoeff: float = 0.7, compression: str = 'gzip'):
-        """
-        Save the combined ΔF/F activity matrix to an HDF5 file
-        
-        Args:
-            path: Path to save the HDF5 file
-            time_window: Time window to extract data for (in seconds)
-            neucoeff: Neuropil coefficient for ΔF/F calculation
-            compression: Compression method for HDF5
-        """
-        dff_matrix, timestamps = self.get_dff_activity_matrix(time_window, neucoeff)
-        
-        if dff_matrix.size == 0:
-            print("Warning: No ΔF/F data to save!")
-            return
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
-        
-        # Save to HDF5 file
-        with h5py.File(path, 'w') as f:
-            # Save the main ΔF/F matrix
-            f.create_dataset('dff_matrix', 
-                            data=dff_matrix, 
-                            compression=compression,
-                            chunks=True)
-            
-            # Save timestamps
-            f.create_dataset('timestamps', 
-                            data=timestamps, 
-                            compression=compression)
-            
-            # Save metadata
-            f.attrs['eid'] = self.eid
-            f.attrs['subject'] = self.subject
-            f.attrs['date'] = self.date
-            f.attrs['duration_hours'] = self.duration_hours
-            f.attrs['task_protocol'] = self.task_protocol
-            f.attrs['neucoeff'] = neucoeff
-            f.attrs['calculation_method'] = 'suite2p_style'
-            f.attrs['formula'] = 'dF/F = F - neucoeff*Fneu'
-            f.attrs['n_total_neurons'] = self.n_total_neurons
-            f.attrs['time_window'] = time_window if time_window is not None else "full_session"
-            f.attrs['shape_description'] = "dff_matrix: [time_points, neurons], timestamps: [time_points]"
-            
-        print(f"ΔF/F matrix saved to {path}")
-        print(f"Shape: {dff_matrix.shape} (time_points x neurons)")
-        print(f"ΔF/F range: {dff_matrix.min():.3f} to {dff_matrix.max():.3f}")
-        print(f"File size: {os.path.getsize(path) / (1024**2):.2f} MB")
-    
-    def plot_binary_activity_heatmap(self, time_window: float = 300, threshold: float = 0.2):
-        """Plot raster of neural activity for all FOVs"""
-        import matplotlib.pyplot as plt
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(14, 10))
-        
-        # Count total neurons to set up plot
-        total_neurons = self.n_total_neurons
-        
-        if total_neurons == 0:
-            ax.text(0.5, 0.5, "No neurons found in the data!", 
-                  ha='center', va='center', transform=ax.transAxes)
-            return fig
-
-        # Keep track of the neuron starting index for each FOV
-        neuron_start_index = 0
-        
-        # Process each FOV
-        for fov_name, fov in self.fovs.items():
-            # Get neuron activity
-            neuron_activity, timestamps, neuron_mask = fov.get_neuron_activity(time_window)
-            n_neurons = neuron_activity.shape[1]
-            
-            if n_neurons == 0:
-                continue
-                
-            # Normalize activity per neuron
-            normalized_data = np.zeros_like(neuron_activity)
-            for r in range(neuron_activity.shape[1]):
-                roi_max = np.max(neuron_activity[:, r])
-                if roi_max > 0:  # Avoid division by zero
-                    normalized_data[:, r] = neuron_activity[:, r] / roi_max
-            
-            # Find activity above threshold
-            binary_activity = normalized_data > threshold
-            
-            # Skip if no activity above threshold
-            if not np.any(binary_activity):
-                neuron_start_index += n_neurons  # Still increment the index
-                continue
-            
-            # Find active points
-            active_points = np.where(binary_activity.T)
-            
-            if len(active_points) >= 2 and len(active_points[0]) > 0:
-                active_neurons = active_points[0] + neuron_start_index
-                active_time_indices = active_points[1]
-                
-                # Plot raster
-                ax.scatter(
-                    timestamps[active_time_indices], 
-                    active_neurons,
-                    s=1, 
-                    color='green', 
-                    alpha=0.5, 
-                    marker='|'
-                )
-            
-            # Update neuron start index
-            neuron_start_index += n_neurons
-        
-        # Add labels and title
-        ax.set_title(f"Neuron Activity Raster ({total_neurons} neurons, threshold={threshold:.2f})")
-        ax.set_xlabel("Time (seconds)")
-        ax.set_ylabel("Neuron index")
-        ax.set_ylim(-1, total_neurons)
-        
-        # Add horizontal lines to separate FOVs
-        neuron_count = 0
-        for fov_name, fov in self.fovs.items():
-            n_neurons = fov.n_neurons
-            neuron_count += n_neurons
-            if neuron_count > 0:
-                ax.axhline(neuron_count, color='black', linestyle='--', alpha=0.3)
-        
-        # Add FOV labels
-        neuron_count = 0
-        for fov_name, fov in self.fovs.items():
-            n_neurons = fov.n_neurons
-            if n_neurons > 0:
-                middle_pos = neuron_count + n_neurons / 2
-                ax.text(-30, middle_pos, fov_name, 
-                       verticalalignment='center', fontsize=10)
-                neuron_count += n_neurons
-        
-        # Add grid
-        ax.grid(True, alpha=0.3, axis='x')
-        
-        plt.tight_layout()
-        return fig
 
 # Helper functions
-def _calculate_duration(session_info) -> float:
+def _calculate_duration(session_info) -> Tuple[float, float]:
     """Calculate session duration in hours"""
     from datetime import datetime
     
@@ -582,7 +532,7 @@ def _calculate_duration(session_info) -> float:
                 end_dt = session_end
                 
             duration_seconds = (end_dt - start_dt).total_seconds()
-            return duration_seconds / 3600
+            return duration_seconds / 3600, duration_seconds
         except Exception:
             pass
     
