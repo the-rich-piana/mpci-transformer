@@ -335,7 +335,7 @@ class MesoscopeSession(BaseModel):
             )
             
             # Store preprocessed data as instance attributes
-            session._processed_data = f['processed_data'][:]
+            session._activity = f['activity'][:]
             session._timestamps = f['timestamps'][:]
             session._neuron_mask = f['neuron_mask'][:]
             
@@ -348,7 +348,7 @@ class MesoscopeSession(BaseModel):
                     session._normalization_params[key] = f['normalization'].attrs[key]
         
         print(f"Preprocessed session loaded from {path}")
-        print(f"Shape: {session._processed_data.shape} (time_points x neurons)")
+        print(f"Shape: {session._activity.shape} (time_points x neurons)")
         print(f"EID: {session.eid}, Subject: {session.subject}")
         
         return session
@@ -357,12 +357,12 @@ class MesoscopeSession(BaseModel):
         """Get preprocessed data (only available for sessions loaded from preprocessed files)
         
         Returns:
-            Tuple[np.ndarray, np.ndarray]: (processed_data, timestamps)
+            Tuple[np.ndarray, np.ndarray]: (activity, timestamps)
         """
-        if not hasattr(self, '_processed_data'):
+        if not hasattr(self, '_activity'):
             raise ValueError("No preprocessed data available. Use from_preprocessed() to load preprocessed sessions.")
         
-        return self._processed_data, self._timestamps
+        return self._activity, self._timestamps
     
     @classmethod
     def load_activity_matrix(cls, path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, Union[str, float, int]]]:

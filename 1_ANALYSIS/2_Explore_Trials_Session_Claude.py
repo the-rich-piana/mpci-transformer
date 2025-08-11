@@ -46,12 +46,15 @@ print(f"{preprocessed_session.feedback_times[:10]}")
 # ## Wheel Data
 
 # %%
+len(timestamps) / 4.9
+
+# %%
 # %%
 # Plot wheel velocity with behavioral events (with zoom capability)
 
 # Set time window for zooming (in minutes)
 start_time_min = 0  # Start at 10 minutes
-duration_min = 5     # Show 5 minutes worth of data
+duration_min = 60     # Show 5 minutes worth of data
 
 # Convert to seconds and find indices
 start_time_sec = start_time_min * 60
@@ -278,6 +281,10 @@ ax.imshow(X_embedding, vmin=0, vmax=0.8, cmap="gray_r", aspect="auto")
 # %%
 import matplotlib.patches as patches
 
+# Define time window for visualization (in sample indices)
+xmin_idx = 12000
+xmax_idx = 15000
+
 def plot_behavioral_events(ax, stim_times, stim_off_times, feedback_times, timestamps, xmin_idx, xmax_idx):
     """Plot stimulus onset/offset times and feedback times as vertical lines"""
     # Convert time indices to actual time
@@ -355,9 +362,6 @@ def plot_wheel_velocity(ax, aligned_wheel_velocity, timestamps, xmin_idx, xmax_i
     else:
         ax.set_ylim(-0.1, 0.1)  # Show small range if all zeros
 
-# Define time window for visualization (in sample indices)
-xmin_idx = 6000
-xmax_idx = 8000
 
 # Create figure with grid for easy plotting
 fig = plt.figure(figsize=(15, 8), dpi=150)
@@ -405,7 +409,29 @@ print(f"  Mean |velocity|: {np.mean(np.abs(vel_window)):.3f} rad/s")
 
 
 # %%
-# Create stimulus-colored rastermap overlay
+print(preprocessed_session.contrastLeft[0:8])
+print(preprocessed_session.contrastRight[0:8])
+
+# %%
+import treescope
+treescope.basic_interactive_setup(autovisualize_arrays=False)
+
+# %%
+stack = np.column_stack((preprocessed_session.contrastLeft, preprocessed_session.contrastRight)).T
+
+
+# %%
+stack
+
+# %%
+for i in range(0,stack.shape[1]):
+    # print(stack[0,i], stack[1, i])
+    if stack[0,i] == 0 and stack[1, i] == 0:
+        print("hello")    
+    if np.isnan(stack[0,i]) and np.isnan(stack[1, i]):
+        print("hello")
+
+# %%
 def create_stimulus_overlay(stimulus_onehot, xmin_idx, xmax_idx):
     """Create a colored overlay for stimulus types"""
     # Get stimulus data for the time window
@@ -495,8 +521,72 @@ print(f"  Range: {np.min(vel_window):.3f} to {np.max(vel_window):.3f} rad/s")
 print(f"  Non-zero samples: {np.sum(vel_window != 0)}/{len(vel_window)} ({100*np.sum(vel_window != 0)/len(vel_window):.1f}%)")
 print(f"  Mean |velocity|: {np.mean(np.abs(vel_window)):.3f} rad/s")
 
+
 # %%
-stimulus_onehot[120:200, :]
+print("=== DEBUG: Stimulus Overlay Alignment ===")
+
+# Check the time window we're plotting
+print(f"Time window indices: {xmin_idx} to {xmax_idx} (span: {xmax_idx - xmin_idx} samples)")
+print(f"Time window in seconds: {timestamps[xmin_idx]:.2f}s to {timestamps[xmax_idx-1]:.2f}s")
+
+# Get stimulus data for this window
+stim_window = stimulus_onehot[xmin_idx:xmax_idx]
+print(f"Stimulus window shape: {stim_window.shape}")
+
+# Find trials that should be in this time window
+window_start_time = timestamps[xmin_idx]
+window_end_time = timestamps[xmax_idx-1] if xmax_idx <= len(timestamps) else timestamps[-1]
+
+stim_on_in_window = []
+stim_off_in_window = []
+trial_indices = []
+
+for trial_idx in range(len(preprocessed_session.stimOn_times)):
+    stim_on = preprocessed_session.stimOn_times[trial_idx]
+    stim_off = preprocessed_session.stimOff_times[trial_idx]
+    
+    if (not np.isnan(stim_on) and not np.isnan(stim_off) and 
+        stim_on >= window_start_time and stim_off <= window_end_time):
+        stim_on_in_window.append(stim_on)
+        stim_off_in_window.append(stim_off)
+        trial_indices.append(trial_idx)
+        
+        # Check stimulus encoding for this trial
+        left_c = preprocessed_session.contrastLeft[trial_idx]
+        right_c = preprocessed_session.contrastRight[trial_idx]
+        
+        print(f"Trial {trial_idx}: stim_on={stim_on:.2f}s, stim_off={stim_off:.2f}s")
+        print(f"  Contrasts: left={left_c}, right={right_c}")
+        
+        # Find corresponding indices in timestamps
+        on_idx = np.searchsorted(timestamps, stim_on) - xmin_idx
+        off_idx = np.searchsorted(timestamps, stim_off) - xmin_idx
+        
+        print(f"  Relative indices in window: on={on_idx}, off={off_idx}")
+        
+        # Check what stimulus encoding says for this period
+        if 0 <= on_idx < len(stim_window) and 0 <= off_idx < len(stim_window):
+            stim_during_period = stim_window[on_idx:off_idx+1]
+            active_types = np.where(stim_during_period.sum(axis=0) > 0)[0]
+            print(f"  Encoded stimulus types during period: {active_types}")
+        else:
+            print(f"  WARNING: Indices out of bounds for stimulus window")
+
+print(f"\nTotal trials in window: {len(trial_indices)}")
+
+# Check if there are any stimulus encodings in our window
+active_timepoints = np.where(stim_window.sum(axis=1) > 0)[0]
+print(f"Timepoints with stimulus encoding: {len(active_timepoints)}/{len(stim_window)}")
+
+if len(active_timepoints) > 0:
+    print(f"First active timepoint: {active_timepoints[0]} (time: {timestamps[xmin_idx + active_timepoints[0]]:.2f}s)")
+    print(f"Last active timepoint: {active_timepoints[-1]} (time: {timestamps[xmin_idx + active_timepoints[-1]]:.2f}s)")
+    
+    # Show stimulus types present
+    stim_types_present = np.where(stim_window.sum(axis=0) > 0)[0]
+    print(f"Stimulus types present in window: {stim_types_present}")
+else:
+    print("No stimulus encodings found in this window!")
 
 # %%
 def plot_stimulus_specific_blocks(stimulus_onehot, X_embedding, stimulus_type, timestamps):
@@ -682,73 +772,6 @@ def recompute_rastermap_for_stimulus(stimulus_onehot, activity, stimulus_type, t
 new_model, new_X_embedding, stim_activity = recompute_rastermap_for_stimulus(
     stimulus_onehot, activity, 1, timestamps
 )
-
-# %%
-# Debug stimulus overlay alignment
-print("=== DEBUG: Stimulus Overlay Alignment ===")
-
-# Check the time window we're plotting
-print(f"Time window indices: {xmin_idx} to {xmax_idx} (span: {xmax_idx - xmin_idx} samples)")
-print(f"Time window in seconds: {timestamps[xmin_idx]:.2f}s to {timestamps[xmax_idx-1]:.2f}s")
-
-# Get stimulus data for this window
-stim_window = stimulus_onehot[xmin_idx:xmax_idx]
-print(f"Stimulus window shape: {stim_window.shape}")
-
-# Find trials that should be in this time window
-window_start_time = timestamps[xmin_idx]
-window_end_time = timestamps[xmax_idx-1] if xmax_idx <= len(timestamps) else timestamps[-1]
-
-stim_on_in_window = []
-stim_off_in_window = []
-trial_indices = []
-
-for trial_idx in range(len(preprocessed_session.stimOn_times)):
-    stim_on = preprocessed_session.stimOn_times[trial_idx]
-    stim_off = preprocessed_session.stimOff_times[trial_idx]
-    
-    if (not np.isnan(stim_on) and not np.isnan(stim_off) and 
-        stim_on >= window_start_time and stim_off <= window_end_time):
-        stim_on_in_window.append(stim_on)
-        stim_off_in_window.append(stim_off)
-        trial_indices.append(trial_idx)
-        
-        # Check stimulus encoding for this trial
-        left_c = preprocessed_session.contrastLeft[trial_idx]
-        right_c = preprocessed_session.contrastRight[trial_idx]
-        
-        print(f"Trial {trial_idx}: stim_on={stim_on:.2f}s, stim_off={stim_off:.2f}s")
-        print(f"  Contrasts: left={left_c}, right={right_c}")
-        
-        # Find corresponding indices in timestamps
-        on_idx = np.searchsorted(timestamps, stim_on) - xmin_idx
-        off_idx = np.searchsorted(timestamps, stim_off) - xmin_idx
-        
-        print(f"  Relative indices in window: on={on_idx}, off={off_idx}")
-        
-        # Check what stimulus encoding says for this period
-        if 0 <= on_idx < len(stim_window) and 0 <= off_idx < len(stim_window):
-            stim_during_period = stim_window[on_idx:off_idx+1]
-            active_types = np.where(stim_during_period.sum(axis=0) > 0)[0]
-            print(f"  Encoded stimulus types during period: {active_types}")
-        else:
-            print(f"  WARNING: Indices out of bounds for stimulus window")
-
-print(f"\nTotal trials in window: {len(trial_indices)}")
-
-# Check if there are any stimulus encodings in our window
-active_timepoints = np.where(stim_window.sum(axis=1) > 0)[0]
-print(f"Timepoints with stimulus encoding: {len(active_timepoints)}/{len(stim_window)}")
-
-if len(active_timepoints) > 0:
-    print(f"First active timepoint: {active_timepoints[0]} (time: {timestamps[xmin_idx + active_timepoints[0]]:.2f}s)")
-    print(f"Last active timepoint: {active_timepoints[-1]} (time: {timestamps[xmin_idx + active_timepoints[-1]]:.2f}s)")
-    
-    # Show stimulus types present
-    stim_types_present = np.where(stim_window.sum(axis=0) > 0)[0]
-    print(f"Stimulus types present in window: {stim_types_present}")
-else:
-    print("No stimulus encodings found in this window!")
 
 # %%
 

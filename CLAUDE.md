@@ -25,14 +25,14 @@ This repository contains a neural time series forecasting project that applies t
   - `get_dff_activity_matrix()`: Extract ΔF/F activity across FOVs (exploration only)
   - `get_preprocessed_data()`: Access preprocessed data (training mode only)
 
-#### 2. Data Preprocessing (`2_PREPROCESSING/activity_preprocessor.py`)
+#### 2. Data Preprocessing (`utils/activity_preprocessor.py`)
 - `CalciumDataPreprocessor`: Complete preprocessing pipeline for calcium imaging data
 - Handles ΔF/F calculation, neuron filtering, robust normalization, and temporal smoothing
 - Saves preprocessed data with behavioral data to HDF5 files for training
 
 #### 3. Directory Structure
 - `1_ANALYSIS/`: Exploratory data analysis notebooks
-- `2_PREPROCESSING/`: Data normalization, preprocessing pipeline, and quality control
+- `2_PREPROCESSING/`: Data normalization, preprocessing pipeline, and quality control notebooks
 - `3_MODELLING/`: Deep learning model implementations
   - Transformer variants (Informer, Autoformer, DLinear)
   - Baseline models (linear regression, autoregression)
@@ -173,7 +173,93 @@ The project uses a standardized encoding for IBL behavioral trials based on cont
 - **`_get_stimulus_type(left_contrast, right_contrast, contrast_values)`**: Maps individual trial contrasts to stimulus type indices
 - **Visualization**: Color-coded overlays on rastermap plots show stimulus timing and type
 
+## Covariate Integration System
+
+### Covariate Builder (`utils/covariate_builder.py`)
+The project includes a comprehensive behavioral covariate system for time series forecasting:
+
+- **`build_covariate_matrix(session, timestamps, aligned_wheel_velocity)`**: Creates [n_timepoints, 11] covariate matrix
+- **11-feature structure**: wheel_velocity [1] + stimulus_types [9] + trial_phase [1]
+- **Temporal alignment**: All covariates precisely aligned to neural timestamps at 5Hz sampling
+- **Feature documentation**: Complete metadata with descriptions for each covariate
+
+### Updated HDF5 Schema (Post-Covariate Integration)
+```
+/activity                   # Neural activity [n_timepoints, n_neurons] (renamed from processed_data)
+/covariate_matrix          # Behavioral features [n_timepoints, 11] 
+/timestamps                # Neural timestamps
+/covariate_metadata/       # Feature names and descriptions
+  ├── feature_names        # String array: ['wheel_velocity', 'stimulus_catch_trial', ...]
+  └── [feature]_description # Detailed descriptions as HDF5 attributes
+/trial_data/              # Original behavioral data (preserved)
+/normalization/           # Preprocessing parameters (preserved)  
+/metadata/               # Session metadata (preserved)
+```
+
+### Covariate Features [n_timepoints, 11]
+1. **wheel_velocity**: Aligned wheel velocity (rad/s) calculated from position data
+2. **stimulus_catch_trial**: Binary indicator for catch trials (no visual stimulus)
+3-6. **stimulus_left_[100|25|12.5|6.25]pct**: Binary indicators for left-side stimuli by contrast
+7-10. **stimulus_right_[100|25|12.5|6.25]pct**: Binary indicators for right-side stimuli by contrast
+11. **trial_phase**: Binary indicator (1=stimulus period, 0=inter-trial interval)
+
+### Dataset_Activity Integration
+Updated Dataset_Activity class now supports covariate loading:
+- **Real covariate data**: Replaces dummy `seq_x_mark`/`seq_y_mark` tensors with actual behavioral features
+- **Sequence alignment**: Input and target covariates properly aligned with neural sequences
+- **Torch-free testing**: `SimpleDataset` base class for testing without PyTorch dependency
+- **Clear documentation**: Detailed comments explaining sequence extraction logic (`s_begin`, `s_end`, `r_begin`, `r_end`)
+
+### Validation Suite (`2_PREPROCESSING/4_Validate_Preprocessing_Claude.py`)
+Comprehensive validation notebook with 4 consolidated cells:
+- **Treescope integration**: `np.column_stack()` arrays for visual data inspection
+- **Rastermap visualization**: Stimulus-colored overlays matching analysis style
+- **Temporal alignment validation**: Verifies neural-behavioral synchronization
+- **Dataset_Activity testing**: Standalone covariate loading verification
+- **Ready/not-ready assessment**: Clear status for DLinear integration
+
+### Usage Examples
+
+#### Preprocessing with Covariates
+```python
+from utils.activity_preprocessor import CalciumDataPreprocessor
+
+# Preprocessing automatically builds and saves covariate matrix
+preprocessor = CalciumDataPreprocessor(neucoeff=0.7, temporal_smoothing=True)
+results = preprocessor.preprocess_session(session, 'processed_data/session.h5')
+
+# Results include covariate_matrix in trial_data
+covariate_matrix = results['trial_data']['covariate_matrix']  # [n_timepoints, 11]
+feature_names = results['trial_data']['covariate_feature_names']
+```
+
+#### Loading Preprocessed Data with Covariates
+```python
+# Load session with covariate data
+session = MesoscopeSession.from_preprocessed('processed_data/session.h5')
+
+# Access via HDF5 directly  
+with h5py.File('processed_data/session.h5', 'r') as f:
+    activity = f['activity'][:]                 # Neural data
+    covariate_matrix = f['covariate_matrix'][:]  # Behavioral features
+    feature_names = [name.decode('utf-8') for name in f['covariate_metadata']['feature_names'][:]]
+```
+
+#### Dataset_Activity with Covariates
+```python  
+from 2_PREPROCESSING.Test_Data_Loader import Dataset_Activity
+
+dataset = Dataset_Activity(root_path="DATA/", data_path="session.h5", flag='train')
+seq_x, seq_y, seq_x_mark, seq_y_mark = dataset[0]
+
+# seq_x_mark: [96, 11] input behavioral features
+# seq_y_mark: [144, 11] target behavioral features (known future values)
+```
+
 ## Data Sources
 - `good_mesoscope_sessions_final.csv`: Curated list of high-quality IBL sessions
 - Raw IBL data accessed via ONE API
-- Processed activity matrices stored in `DATA/activity_raw.h5`
+- Processed activity matrices stored in `DATA/session_[eid].h5`
+
+## Memories
+- **Covariate Integration Complete**: Implemented comprehensive behavioral covariate system with 11-dimensional feature matrix (wheel velocity + 9 stimulus types + trial phase), integrated into preprocessing pipeline, updated HDF5 schema, and validated with comprehensive testing suite. Ready for DLinear forecasting experiments.

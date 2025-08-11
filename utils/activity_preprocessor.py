@@ -4,6 +4,7 @@ import h5py
 from pathlib import Path
 from scipy.ndimage import gaussian_filter1d
 from load_meso_session import MesoscopeSession
+from covariate_builder import build_covariate_matrix, get_covariate_descriptions
 from one.api import ONE
 
 class CalciumDataPreprocessor:
@@ -42,6 +43,20 @@ class CalciumDataPreprocessor:
         print(f"   Raw ΔF/F shape: {dff_matrix.shape}")
         print(f"   Raw ΔF/F range: {dff_matrix.min():.1f} to {dff_matrix.max():.1f}")
         
+        # Step 1.5: Truncate to remove passive video period
+        print("\n1.5. Truncating passive video period...")
+        last_stimoff = session.stimOff_times[-1]
+        cutoff_idx = np.searchsorted(timestamps, last_stimoff, side='right')
+        original_duration = timestamps[-1] - timestamps[0]
+        
+        dff_matrix = dff_matrix[:cutoff_idx]
+        timestamps = timestamps[:cutoff_idx]
+        truncated_duration = timestamps[-1] - timestamps[0]
+        
+        print(f"   Last stimOff at {last_stimoff:.1f}s, truncating at index {cutoff_idx}")
+        print(f"   Truncated shape: {dff_matrix.shape}")
+        print(f"   Duration: {original_duration:.1f}s → {truncated_duration:.1f}s ({truncated_duration/original_duration:.1%} retained)")
+        
         # Step 2: Filter problematic neurons
         print("\n2. Filtering neurons...")
         filtered_data, neuron_mask = self._filter_neurons(dff_matrix)
@@ -70,13 +85,21 @@ class CalciumDataPreprocessor:
         print(f"   Wheel velocity range: {aligned_wheel_velocity.min():.3f} to {aligned_wheel_velocity.max():.3f} rad/s")
         print(f"   Non-zero velocity samples: {np.sum(aligned_wheel_velocity != 0)}/{len(aligned_wheel_velocity)}")
         
-        # Step 6: Quality assessment
-        print("\n6. Quality assessment...")
+        # Step 6: Build covariate matrix
+        print("\n6. Building covariate matrix...")
+        covariate_matrix, covariate_feature_names = build_covariate_matrix(session, timestamps, aligned_wheel_velocity)
+        print(f"   Covariate matrix shape: {covariate_matrix.shape}")
+        print(f"   Features: {len(covariate_feature_names)} total")
+        print(f"   Non-zero covariate samples: {np.sum(covariate_matrix != 0, axis=0)}")
+        
+        # Step 7: Quality assessment
+        print("\n7. Quality assessment...")
         quality_metrics = self._assess_quality(dff_matrix, final_data, neuron_mask)
         
         # Compile results
         results = {
-            'processed_data': final_data,
+            'activity': final_data,
+            'covariate_matrix': covariate_matrix,
             'timestamps': timestamps,
             'neuron_mask': neuron_mask,
             'normalization_params': norm_params,
@@ -92,14 +115,15 @@ class CalciumDataPreprocessor:
                 'feedbackType': session.feedbackType,
                 'intervals': session.intervals,
                 'wheel_timestamps': session.wheel_timestamps,
-                'aligned_wheel_velocity': aligned_wheel_velocity
+                'aligned_wheel_velocity': aligned_wheel_velocity,
+                'covariate_feature_names': covariate_feature_names
             },
             'session_metadata': {
                 'eid': session.eid,
                 'subject': session.subject,
                 'date': session.date,
-                'duration_seconds': session.duration_seconds,
-                'duration_hours': session.duration_hours,
+                'duration_seconds': truncated_duration,
+                'duration_hours': truncated_duration / 3600,
                 'task_protocol': session.task_protocol,
                 'n_original_neurons': session.n_total_neurons,
                 'n_processed_neurons': neuron_mask.sum(),
@@ -236,8 +260,12 @@ class CalciumDataPreprocessor:
         print(f"\n6. Saving processed data to {output_path}")
         
         with h5py.File(output_path, 'w') as f:
-            # Main processed data
-            f.create_dataset('processed_data', data=results['processed_data'], 
+            # Main neural activity data
+            f.create_dataset('activity', data=results['activity'], 
+                           compression='gzip', chunks=True)
+            
+            # Covariate matrix as top-level dataset
+            f.create_dataset('covariate_matrix', data=results['covariate_matrix'],
                            compression='gzip', chunks=True)
             f.create_dataset('timestamps', data=results['timestamps'], 
                            compression='gzip')
@@ -267,6 +295,15 @@ class CalciumDataPreprocessor:
                                       compression='gzip')
             trial_group.create_dataset('wheel_timestamps', data=results['trial_data']['wheel_timestamps'], 
                                       compression='gzip')
+            
+            # Covariate metadata
+            covariate_group = f.create_group('covariate_metadata')
+            covariate_group.create_dataset('feature_names', data=[name.encode('utf-8') for name in results['trial_data']['covariate_feature_names']])
+            
+            # Add feature descriptions as attributes
+            feature_descriptions = get_covariate_descriptions()
+            for feature_name, description in feature_descriptions.items():
+                covariate_group.attrs[f'{feature_name}_description'] = description
             
             # Normalization parameters
             norm_group = f.create_group('normalization')
@@ -299,7 +336,8 @@ class CalciumDataPreprocessor:
                     else:
                         stage_group.attrs[key] = value
         
-        print(f"   Saved {results['processed_data'].shape} processed data matrix")
+        print(f"   Saved {results['activity'].shape} activity matrix")
+        print(f"   Saved {results['covariate_matrix'].shape} covariate matrix")
         print(f"   File size: {output_path.stat().st_size / (1024**2):.2f} MB")
 
 # Usage example
@@ -341,7 +379,7 @@ def preprocess_session_batch(csv_path: str, output_dir: str, session_indices: li
                 'n_original_neurons': results['session_metadata']['n_original_neurons'],
                 'n_processed_neurons': results['session_metadata']['n_processed_neurons'],
                 'retention_rate': results['quality_metrics']['neuron_retention_rate'],
-                'final_shape': results['processed_data'].shape,
+                'final_shape': results['activity'].shape,
                 'output_path': str(output_path)
             }
             results_summary.append(summary)
