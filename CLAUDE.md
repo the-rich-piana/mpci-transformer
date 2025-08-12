@@ -261,5 +261,78 @@ seq_x, seq_y, seq_x_mark, seq_y_mark = dataset[0]
 - Raw IBL data accessed via ONE API
 - Processed activity matrices stored in `DATA/session_[eid].h5`
 
+## TimeSeriesSplitter System
+
+### Leak-Free Data Splitting (`utils/data_splitter.py`)
+The project implements a sophisticated data splitting system that prevents temporal data leakage while allowing appropriate data flow for time series forecasting:
+
+- **`TimeSeriesSplitter`**: Core class that generates leak-aware train/val/test sample indices
+- **Leak-aware logic**: Different rules for each split type:
+  - **Training**: Entire sequence window (seq_len + pred_len) must stay within training data
+  - **Validation**: Can start in train/val data but cannot extend into test data
+  - **Test**: Can start anywhere and extend into any data (most permissive)
+- **Stimulus-based splits**: Uses existing covariate matrix to create balanced splits per stimulus type
+
+### Updated Dataset_Activity Architecture (`2_PREPROCESSING/Test_Data_Loader.py`)
+Complete overhaul of data loading to use leak-free splitting:
+
+- **Replaced chronological splits**: No more border1/border2 approach
+- **Valid indices approach**: `__len__()` returns number of valid samples, `__getitem__(index)` uses `valid_indices[index]` 
+- **Full data storage**: Stores complete dataset and uses TimeSeriesSplitter to determine safe starting points
+- **DLinear compatibility**: Maintains same constructor interface and return shapes
+
+### Splitting Logic Details
+```python
+from utils.data_splitter import TimeSeriesSplitter
+
+# Create stimulus-based split map
+split_map = TimeSeriesSplitter.create_stimulus_based_splits(
+    covariate_matrix=covariate_matrix,  # Uses existing [n_timepoints, 11] matrix
+    train_pct=0.7, val_pct=0.1,
+    held_out_stimulus_types=[]  # Optional held-out types for test
+)
+
+# Generate leak-free sample indices  
+splitter = TimeSeriesSplitter(split_map, seq_len=96, pred_len=96, label_len=48)
+train_indices = splitter.get_indices('train')  # Safe starting points only
+```
+
+### Validation Suite (`2_PREPROCESSING/Validate_LeakFree_Splitting_Claude.py`)
+Comprehensive testing with visualization:
+- **Split visualization**: Timeline plots showing train/val/test boundaries
+- **Window validation**: Confirms sample windows respect split rules
+- **Dataset integration testing**: All three Dataset_Activity classes (train/val/test)
+- **Leak detection**: Explicit validation that no inappropriate data leakage occurs
+
+### Key Results
+- **Sample distribution**: ~63.5% train, ~10.3% val, ~26.2% test from 18,890 total leak-free samples
+- **Stimulus balancing**: All 9 stimulus types properly distributed across splits
+- **Validation passed**: All sample windows respect temporal boundaries correctly
+- **Ready for training**: DLinear-compatible interface maintained
+
+### Usage Examples
+
+#### Basic Dataset Loading
+```python
+from 2_PREPROCESSING.Test_Data_Loader import Dataset_Activity
+
+# Each split uses TimeSeriesSplitter internally
+train_dataset = Dataset_Activity(root_path="../DATA", data_path="session.h5", flag='train')
+val_dataset = Dataset_Activity(root_path="../DATA", data_path="session.h5", flag='val') 
+test_dataset = Dataset_Activity(root_path="../DATA", data_path="session.h5", flag='test')
+
+# Datasets return leak-free samples
+seq_x, seq_y, seq_x_mark, seq_y_mark = train_dataset[0]
+```
+
+#### Custom Split Configuration
+```python
+# Create custom held-out test set (e.g., Left 100% contrast)
+split_map = TimeSeriesSplitter.create_stimulus_based_splits(
+    covariate_matrix, held_out_stimulus_types=[1]  # Hold out Left 100%
+)
+```
+
 ## Memories
 - **Covariate Integration Complete**: Implemented comprehensive behavioral covariate system with 11-dimensional feature matrix (wheel velocity + 9 stimulus types + trial phase), integrated into preprocessing pipeline, updated HDF5 schema, and validated with comprehensive testing suite. Ready for DLinear forecasting experiments.
+- **TimeSeriesSplitter Complete**: Implemented leak-aware data splitting system that prevents temporal data leakage while allowing appropriate data flow for time series models. Uses stimulus-based balancing, generates 18,890 leak-free samples (63.5% train, 10.3% val, 26.2% test), and maintains DLinear compatibility. Fully validated with comprehensive testing suite showing no data contamination across splits.
