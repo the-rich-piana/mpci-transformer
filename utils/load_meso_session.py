@@ -216,7 +216,7 @@ class MesoscopeSession(BaseModel):
         """Load mesoscope session data from experiment ID"""
         # Get session details
         session_info = one.get_details(eid, full=True)
-        print(session_info)
+        print("Loading session from ONE")
         
         # Load trial data
         trials = one.load_object(eid, 'trials',)
