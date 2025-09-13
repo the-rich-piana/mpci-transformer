@@ -1,0 +1,45 @@
+We have already previously created a rastermap of our whole 
+brain activity over the course of 75.2 minutes. See @3_FIGURES/Rastermap_dff_Claude.py
+There are two portions in our recording session, we get them like this:
+
+last_stimOff_secs = session.stimOff_times[-1]  # trial_phase is the last feature
+print(last_stimOff_secs)
+last_stimoff_timestep_idx = np.searchsorted(timestamps, 
+last_stimOff_secs, side='right') - 1
+print(last_stimoff_timestep_idx) 
+
+3667.244
+18308
+
+The first is 61.1 or so minutes of the mouse performing an 
+active behavioral task, and the last 14 minutes or so the mouse
+is just looking at a passive stimuli. The Rastermap 
+documentation provides a nice way to visualize which brain 
+regions are being activated by using the XYZ locations of 
+neurons. I want to plot two subplots, (she plots many more in 
+@3_FIGURES/rastermap_zebrafish_example.py """We can also 
+divide the rastermap into sections to more easily visualize 
+spatial relations (as in Figure 4):"""...) which show the brain locations of neurons during the 
+active task protocol (up until timestep 18308) and for the 
+passive task protocol (all timesteps after 18308). We don't 
+necessarily need to plot the actual rastermap, but you can do 
+so if you wish. In @1_ANALYSIS/4_Cortical_Regions_Claude.py you
+can see how we plotted the neuron XYZ locations for the entire 
+timeseries in one plot. But now I just want to create two 
+subplots to see which neurons fire in these two time segments. 
+You should create an executable in 3_FIGURES and save the 
+images in the FIGURES directory.
+
+We need to work with the mesoscope session like so:
+session = MesoscopeSession.from_eid(one, "5ea6bb9b-6163-4e8a-816b-efe7002666b0")
+activity, timestamps = session.get_dff_activity_matrix()
+
+And also work with it like so, to get the XYZ locations of neurons:
+# %%
+# run 'path/to/data'
+eid = "5ea6bb9b-6163-4e8a-816b-efe7002666b0"  #session.eid
+embed_meso(eid)
+plot_xyz(eid, mapping='isort')
+plot_xyz(eid, mapping='regions')
+
+What do you think? How difficult is this?

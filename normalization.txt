@@ -1,0 +1,135 @@
+NEURAL CALCIUM IMAGING DATA NORMALIZATION PROCEDURE
+====================================================
+
+This document outlines the complete normalization pipeline for mesoscope calcium imaging data, from raw IBL session loading to final processed neural activity matrices for transformer model training.
+
+## 1. DATA LOADING AND INITIAL PROCESSING
+
+### 1.1 Session Loading (MesoscopeSession.from_eid)
+• Load mesoscope session data from International Brain Laboratory (IBL) via ONE API
+• Session contains multiple Fields of View (FOVs), each with independent calcium imaging data
+• Each FOV includes:
+  - roi_activity: Raw fluorescence traces [frames, ROIs]
+  - neuropil_activity: Neuropil contamination traces [frames, ROIs] 
+  - timestamps: Frame timestamps [frames]
+  - bad_frames: Quality control boolean array [frames]
+  - frame_qc: Additional quality control values [frames]
+  - roi_types: ROI classification (1=neuron, other types filtered out)
+
+### 1.2 Quality Control Filtering
+• We screened the Alyx database for sessions that had no quality control issues, resulting in 11 mesoscope sessions.
+• We experimented with many sessions but 
+• Create good frame mask: good_frame_mask = (bad_frames == 0) & (frame_qc == 0)
+• Filter all data arrays to retain only high-quality frames
+• Remove non-neuronal ROIs by filtering roi_types != 1
+
+### 1.3 ΔF/F Calculation (Suite2p Method)
+• Neuropil correction: f_corrected = roi_activity - neucoeff × neuropil_activity
+  - Default neucoeff = 0.7 (Suite2p standard)
+• Baseline estimation: f0 = max(percentile_10(f_corrected), 1.0)
+  - 10th percentile baseline calculation along temporal axis
+  - Minimum baseline threshold of 1.0 to avoid division by small numbers
+• ΔF/F computation: dff = (f_corrected - f0) / f0
+• FOV-level ΔF/F matrices: [time_points, neurons_per_fov]
+
+### 1.4 Multi-FOV Concatenation
+• Combine ΔF/F activity across all FOVs: get_dff_activity_matrix()
+• Concatenate along neuron dimension to create session-level matrix
+• Verify temporal alignment across FOVs (same timestamps)
+• Final raw ΔF/F matrix: [time_points, total_neurons_across_fovs]
+
+## 2. PREPROCESSING PIPELINE (CalciumDataPreprocessor)
+
+### 2.1 Temporal Truncation
+• Remove passive video period to focus on active behavioral task
+• Find last stimulus offset time: last_stimoff = stimOff_times[-1]
+• Truncate data: cutoff_idx = searchsorted(timestamps, last_stimoff)
+• Retain only: dff_matrix[:cutoff_idx], timestamps[:cutoff_idx]
+• Typical retention: ~70-80% of original recording duration
+
+### 2.2 Robust Per-Neuron Normalization
+• Calculate extreme percentiles per neuron:
+  - q005 = percentile_0.5(dff_matrix, axis=0)
+  - q995 = percentile_99.5(dff_matrix, axis=0)
+• Compute robust range: data_range = max(q995 - q005, 0.1)
+  - Minimum range of 0.1 prevents division by zero
+• Scale to [0,1]: normalized = (dff_matrix - q005) / data_range
+• Clip extreme outliers: normalized = clip(normalized, -0.25, 1.5)
+  - Allows moderate negative values and extends positive range
+• Per-neuron scaling ensures comparable dynamic ranges across neurons
+
+### 2.3 Neuron Selection
+• Select first N neurons (default N=5000) without quality-based filtering
+• Simple indexing: selected_neurons = normalized_data[:, :top_n_neurons]
+• Create selection mask: neuron_mask[indices] = True
+• Preserves neuron ordering from original FOV concatenation
+
+### 2.4 Temporal Smoothing (Optional)
+• Apply mild Gaussian smoothing along temporal axis
+• Default sigma = 1.0 time steps
+• Formula: smoothed = gaussian_filter1d(data, sigma=1.0, axis=0)
+• Reduces high-frequency noise while preserving neural dynamics
+• Applied to final selected neuron subset
+
+### 2.5 Behavioral Covariate Construction
+• Wheel velocity alignment:
+  - Calculate from wheel position using brainbox.behavior.wheel
+  - 5Hz sampling, 2Hz low-pass filter, ±2.5 rad/s clipping
+  - Interpolate to neural timestamps with zero-padding for gaps
+• Stimulus type encoding (9-dimensional one-hot):
+  - Type 0: Catch trials (no visual stimulus)
+  - Types 1-4: Left stimuli (100%, 25%, 12.5%, 6.25% contrast)
+  - Types 5-8: Right stimuli (100%, 25%, 12.5%, 6.25% contrast)
+• Trial phase encoding: Binary (stimulus period vs inter-trial interval)
+• Final covariate matrix: [time_points, 11] features
+
+## 3. OUTPUT DATA STRUCTURE
+
+### 3.1 Primary Neural Data
+• activity: Fully processed neural activity [time_points, selected_neurons]
+• timestamps: Corresponding time points [time_points]
+• neuron_mask: Boolean selection mask [original_total_neurons]
+
+### 3.2 Normalization Parameters (Stored for Reversibility)
+• q005, q995: Per-neuron percentile values [selected_neurons]
+• data_range: Per-neuron scaling factors [selected_neurons] 
+• method: String identifier ("robust_percentile_0.5_99.5")
+
+### 3.3 Behavioral Data
+• covariate_matrix: Aligned behavioral features [time_points, 11]
+• Trial timing: stimOn_times, stimOff_times, feedback_times
+• Behavioral responses: wheel_position, response_times, feedbackType
+• Stimulus parameters: contrastLeft, contrastRight
+• Metadata: feature_names, descriptions for covariate interpretation
+
+### 3.4 Quality Metrics
+• original_shape vs processed_shape: Data size changes
+• neuron_retention_rate: Fraction of neurons retained
+• range_statistics: Before/after normalization ranges
+• sparsity_measures: Fraction of near-zero values
+• outlier_statistics: Extreme value frequencies
+
+## 4. MATHEMATICAL SUMMARY
+
+### Complete Normalization Transform
+For each neuron n and time point t:
+
+1. ΔF/F: dff[t,n] = (f_corrected[t,n] - f0[n]) / f0[n]
+   where f_corrected[t,n] = roi_activity[t,n] - 0.7 × neuropil_activity[t,n]
+   and f0[n] = max(percentile_10(f_corrected[:,n]), 1.0)
+
+2. Robust scaling: normalized[t,n] = (dff[t,n] - q005[n]) / max(q995[n] - q005[n], 0.1)
+
+3. Clipping: final[t,n] = clip(normalized[t,n], -0.25, 1.5)
+
+4. Optional smoothing: smoothed[t,n] = gaussian_filter(final[:,n], σ=1.0)
+
+### Key Parameters
+• Neuropil coefficient: 0.7 (Suite2p standard)
+• Baseline percentile: 10th percentile
+• Normalization percentiles: 0.5th and 99.5th
+• Clipping bounds: [-0.25, 1.5]
+• Temporal smoothing: σ = 1.0 time steps
+• Default neuron selection: 5000 neurons
+
+This normalization procedure transforms raw calcium imaging fluorescence into standardized neural activity suitable for deep learning time series models, while preserving biological signal dynamics and temporal structure.

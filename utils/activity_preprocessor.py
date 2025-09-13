@@ -20,13 +20,17 @@ class CalciumDataPreprocessor:
         
     def preprocess_session(self, session: MesoscopeSession, 
                           output_path: str = None,
-                          save_intermediates: bool = False) -> dict:
+                          top_n_neurons: int = 5000,
+                          include_passive: bool = False,
+                          save_intermediates: bool = False,
+                          ) -> dict:
         """
         Complete preprocessing pipeline for a mesoscope session
         
         Args:
             session: MesoscopeSession object
             output_path: Path to save processed data
+            top_n_neurons: Number of top neurons to select (default: 5000)
             save_intermediates: Whether to save intermediate processing steps
             
         Returns:
@@ -39,45 +43,74 @@ class CalciumDataPreprocessor:
         # Step 1: Load ΔF/F data
         print("\n1. Loading ΔF/F data...")
         dff_matrix, timestamps = session.get_dff_activity_matrix(neucoeff=self.neucoeff)
+        print(f"MEAN: {dff_matrix.mean()}")
         
         print(f"   Raw ΔF/F shape: {dff_matrix.shape}")
         print(f"   Raw ΔF/F range: {dff_matrix.min():.1f} to {dff_matrix.max():.1f}")
         
-        # Step 1.5: Truncate to remove passive video period
-        print("\n1.5. Truncating passive video period...")
-        last_stimoff = session.stimOff_times[-1]
-        cutoff_idx = np.searchsorted(timestamps, last_stimoff, side='right')
-        original_duration = timestamps[-1] - timestamps[0]
         
-        dff_matrix = dff_matrix[:cutoff_idx]
-        timestamps = timestamps[:cutoff_idx]
-        truncated_duration = timestamps[-1] - timestamps[0]
+        if include_passive:
+            # Step 1.5: Keep entire time series including passive period
+            print("\n1.5. Keeping entire time series (including passive period)...")
+            original_duration = timestamps[-1] - timestamps[0]
+            truncated_duration = original_duration
+            
+            print(f"   Keeping full duration: {original_duration:.1f}s")
+            print(f"   Final shape: {dff_matrix.shape}")
+            
+        else:
+            # Step 1.5: Truncate to remove passive video period
+            print("\n1.5. Truncating passive video period...")
+            last_stimoff = session.stimOff_times[-1]
+            cutoff_idx = np.searchsorted(timestamps, last_stimoff, side='right')
+            original_duration = timestamps[-1] - timestamps[0]
+            
+            dff_matrix = dff_matrix[:cutoff_idx]
+            timestamps = timestamps[:cutoff_idx]
+            truncated_duration = timestamps[-1] - timestamps[0]
+            
+            print(f"   Last stimOff at {last_stimoff:.1f}s, truncating at index {cutoff_idx}")
+            print(f"   Truncated shape: {dff_matrix.shape}")
+            print(f"   Duration: {original_duration:.1f}s → {truncated_duration:.1f}s ({truncated_duration/original_duration:.1%} retained)")
         
-        print(f"   Last stimOff at {last_stimoff:.1f}s, truncating at index {cutoff_idx}")
-        print(f"   Truncated shape: {dff_matrix.shape}")
-        print(f"   Duration: {original_duration:.1f}s → {truncated_duration:.1f}s ({truncated_duration/original_duration:.1%} retained)")
-        
-        # Step 2: Filter problematic neurons
-        print("\n2. Filtering neurons...")
-        filtered_data, neuron_mask = self._filter_neurons(dff_matrix)
-        
-        print(f"   Kept {neuron_mask.sum()} neurons out of {len(neuron_mask)}")
-        print(f"   Filtered data range: {filtered_data.min():.1f} to {filtered_data.max():.1f}")
-        
-        # Step 3: Robust normalization
-        print("\n3. Applying robust normalization...")
-        normalized_data, norm_params = self._robust_normalize(filtered_data)
+        # Step 2: Robust normalization (applied to full matrix)
+        print("\n2. Applying robust normalization...")
+        normalized_data, norm_params = self._robust_normalize(dff_matrix)
         
         print(f"   Normalized range: {normalized_data.min():.3f} to {normalized_data.max():.3f}")
+        print(f"   Original mean: {dff_matrix.mean():.3f}, std: {dff_matrix.std():.3f}")        
         print(f"   Normalized mean: {normalized_data.mean():.3f}, std: {normalized_data.std():.3f}")
+        
+        # Step 3: Select first N neurons (no filtering, just selection)
+        print(f"\n3. Selecting first {top_n_neurons} neurons...")
+        if top_n_neurons is not None and top_n_neurons < dff_matrix.shape[1]:
+            # Get indices of first N neurons
+            top_n_indices = np.arange(top_n_neurons)
+            
+            # Select final data to be processed
+            final_data_normalized = normalized_data[:, :top_n_neurons]
+            print(f"Selected neurons mean: {final_data_normalized.mean()}")
+            
+            # Create final mask
+            final_neuron_mask = np.zeros(dff_matrix.shape[1], dtype=bool)
+            final_neuron_mask[top_n_indices] = True
+            
+            print(f"   Selected first {top_n_neurons} neurons from {dff_matrix.shape[1]} total neurons")
+            print(f"   Selection method: first N neurons")
+            
+        else:
+            # Keep all neurons if top_n not specified or larger than available
+            final_data_normalized = normalized_data
+            final_neuron_mask = np.ones(dff_matrix.shape[1], dtype=bool)
+            print(f"   Keeping all {dff_matrix.shape[1]} neurons (top_n={top_n_neurons})")
         
         # Step 4: Optional temporal smoothing
         if self.temporal_smoothing:
             print("\n4. Applying temporal smoothing...")
-            smoothed_data = self._temporal_smooth(normalized_data)
+            smoothed_data = self._temporal_smooth(final_data_normalized)
             final_data = smoothed_data
         else:
-            final_data = normalized_data
+            final_data = final_data_normalized
             
         # Step 5: Calculate aligned wheel velocity
         print("\n5. Calculating aligned wheel velocity...")
@@ -94,14 +127,14 @@ class CalciumDataPreprocessor:
         
         # Step 7: Quality assessment
         print("\n7. Quality assessment...")
-        quality_metrics = self._assess_quality(dff_matrix, final_data, neuron_mask)
+        quality_metrics = self._assess_quality(dff_matrix, final_data, final_neuron_mask)
         
         # Compile results
         results = {
             'activity': final_data,
             'covariate_matrix': covariate_matrix,
             'timestamps': timestamps,
-            'neuron_mask': neuron_mask,
+            'neuron_mask': final_neuron_mask,
             'normalization_params': norm_params,
             'quality_metrics': quality_metrics,
             'trial_data': {
@@ -126,7 +159,6 @@ class CalciumDataPreprocessor:
                 'duration_hours': truncated_duration / 3600,
                 'task_protocol': session.task_protocol,
                 'n_original_neurons': session.n_total_neurons,
-                'n_processed_neurons': neuron_mask.sum(),
                 'neucoeff': self.neucoeff,
                 'temporal_smoothing': self.temporal_smoothing
             }
@@ -138,56 +170,6 @@ class CalciumDataPreprocessor:
             
         return results
     
-    def _filter_neurons(self, dff_matrix):
-        """Filter out problematic neurons based on statistical criteria"""
-        n_frames, n_neurons = dff_matrix.shape
-        
-        # Calculate per-neuron statistics
-        neuron_medians = np.median(dff_matrix, axis=0)
-        neuron_q99 = np.percentile(dff_matrix, 99, axis=0)
-        neuron_q01 = np.percentile(dff_matrix, 1, axis=0)
-        neuron_iqr = np.percentile(dff_matrix, 75, axis=0) - np.percentile(dff_matrix, 25, axis=0)
-        neuron_stds = np.std(dff_matrix, axis=0)
-        
-        # Filtering criteria
-        # 1. Must have reasonable variability (not flat)
-        min_iqr_threshold = np.percentile(neuron_iqr[neuron_iqr > 0], 5)
-        
-        # 2. Must not have extreme outliers (likely artifacts)
-        max_range_threshold = np.percentile(neuron_q99 - neuron_q01, 95)
-        
-        # 3. Must have reasonable baseline (not too negative)
-        min_median_threshold = np.percentile(neuron_medians, 1)
-        
-        # 4. Must have reasonable standard deviation
-        max_std_threshold = np.percentile(neuron_stds, 99)
-        
-        # 5. Must not be predominantly negative (calcium should be mostly positive)
-        negative_fraction = np.mean(dff_matrix < 0, axis=0)
-        max_negative_fraction = 0.5  # Allow up to 50% negative values
-        
-        # Apply all criteria
-        neuron_mask = (
-            (neuron_iqr > min_iqr_threshold) & 
-            ((neuron_q99 - neuron_q01) < max_range_threshold) & 
-            (neuron_medians > min_median_threshold) &
-            (neuron_stds < max_std_threshold) &
-            (negative_fraction < max_negative_fraction)
-        )
-        
-        # Store filtering stats
-        self.preprocessing_stats['filtering'] = {
-            'n_original': n_neurons,
-            'n_kept': neuron_mask.sum(),
-            'filter_rate': neuron_mask.sum() / n_neurons,
-            'min_iqr_threshold': min_iqr_threshold,
-            'max_range_threshold': max_range_threshold,
-            'min_median_threshold': min_median_threshold,
-            'max_std_threshold': max_std_threshold,
-            'max_negative_fraction': max_negative_fraction
-        }
-        
-        return dff_matrix[:, neuron_mask], neuron_mask
     
     def _robust_normalize(self, data):
         """Apply robust per-neuron normalization"""
@@ -203,7 +185,7 @@ class CalciumDataPreprocessor:
         normalized = (data - q005) / data_range
         
         # Clip extreme outliers
-        normalized = np.clip(normalized, 0, 1)
+        normalized = np.clip(normalized, -0.25, 1.5)
         
         # Store normalization parameters
         norm_params = {
@@ -399,21 +381,3 @@ def preprocess_session_batch(csv_path: str, output_dir: str, session_indices: li
     print(f"{'='*50}")
     
     return results_summary
-
-# # Example usage:
-# if __name__ == "__main__":
-#     # Process a single session
-#     one = ONE()
-#     preprocessor = CalciumDataPreprocessor(neucoeff=0.7, temporal_smoothing=True)
-    
-#     # Load session by EID
-#     eid = "your_eid_here"  # Replace with actual EID
-#     session = MesoscopeSession.from_eid(one, eid, True)
-#     results = preprocessor.preprocess_session(session, 'processed_data/session_000.h5')
-    
-#     # Or process multiple sessions
-#     # summary = preprocess_session_batch(
-#     #     '../good_mesoscope_sessions_final.csv', 
-#     #     'processed_data/',
-#     #     session_indices=[0, 1, 2]  # Process first 3 sessions
-#     # )

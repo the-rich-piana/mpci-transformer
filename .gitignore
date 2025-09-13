@@ -7,3 +7,4 @@ context/
 lightning_logs/
 *.safetensors
 IBL_install.py
+*.DS_Store

@@ -1,0 +1,89 @@
+================================================================================
+VALIDATING REGION ALIGNMENT FOR EID: 5ea6bb9b-6163-4e8a-816b-efe7002666b0
+================================================================================
+
+1. Extracting region labels from MesoscopeSession...
+Loading session with MesoscopeSession.from_eid()...
+Loading session from ONE
+Found 8 FOVs: ['FOV_00', 'FOV_01', 'FOV_02', 'FOV_03', 'FOV_04', 'FOV_05', 'FOV_06', 'FOV_07']
+Processing FOV_00...
+  2269 neurons in FOV_00
+Processing FOV_01...
+  1352 neurons in FOV_01
+Processing FOV_02...
+  2084 neurons in FOV_02
+Processing FOV_03...
+  1396 neurons in FOV_03
+Processing FOV_04...
+  1219 neurons in FOV_04
+Processing FOV_05...
+  1065 neurons in FOV_05
+Processing FOV_06...
+  874 neurons in FOV_06
+Processing FOV_07...
+  1134 neurons in FOV_07
+
+2. Running Brain_Regions.py script...
+Loading mesoscope data for experiment ID: 5ea6bb9b-6163-4e8a-816b-efe7002666b0
+FOV_00
+22074 time bins from  2.034207830070804 to 4515.439207830071 bin size: 0.2000 s
+FOV_00 2269 of 4087 channels are neurons
+FOV_01
+22074 time bins from  2.0584477301124533 to 4515.463447730112 bin size: 0.2000 s
+FOV_01 1352 of 3923 channels are neurons
+FOV_02
+22074 time bins from  2.0840620574760513 to 4515.489062057476 bin size: 0.2000 s
+FOV_02 2084 of 3537 channels are neurons
+FOV_03
+22074 time bins from  2.1189225322782175 to 4515.523922532278 bin size: 0.2000 s
+FOV_03 1396 of 4478 channels are neurons
+FOV_04
+22074 time bins from  2.1509092044981255 to 4515.555909204499 bin size: 0.2000 s
+FOV_04 1219 of 4006 channels are neurons
+FOV_05
+22074 time bins from  2.1604468971261976 to 4515.565446897127 bin size: 0.2000 s
+FOV_05 1065 of 3893 channels are neurons
+FOV_06
+22074 time bins from  2.1926834652228235 to 4515.597683465223 bin size: 0.2000 s
+FOV_06 874 of 3150 channels are neurons
+FOV_07
+22074 time bins from  2.209426488962932 to 4515.614426488963 bin size: 0.2000 s
+FOV_07 1134 of 4587 channels are neurons
+(11393, 22074) ROI signal shape
+Counter({'VISp1': 2856, 'SSp-bfd1': 2439, 'VISrl1': 2414, 'SSp-tr1': 1471, 'RSPagl1': 788, 'VISa1': 774, 'RSPd1': 259, 'VISal1': 249, 'VISam1': 70, 'SSp-ul1': 51, 'SSp-ll1': 22})
+Scaling ROI signals...
+Running rastermap...
+2025-09-08 00:34:43,072 [INFO] normalizing data across axis=1
+2025-09-08 00:34:43,713 [INFO] projecting out mean along axis=0
+2025-09-08 00:34:44,505 [INFO] data normalized, 1.43sec
+2025-09-08 00:34:44,505 [INFO] sorting activity: 11393 valid samples by 22074 timepoints
+2025-09-08 00:34:50,160 [INFO] n_PCs = 100 computed, 7.09sec
+2025-09-08 00:34:50,677 [INFO] 30 clusters computed, time 7.61sec
+2025-09-08 00:34:52,406 [INFO] clusters sorted, time 9.33sec
+2025-09-08 00:34:52,500 [INFO] clusters upsampled, time 9.43sec
+2025-09-08 00:34:53,967 [INFO] rastermap complete, time 10.90sec
+Region labels saved to regions_5ea6bb9b-6163-4e8a-816b-efe7002666b0_validation.csv
+Total neurons: 11393
+Region counts: {'VISp1': 2856, 'SSp-bfd1': 2439, 'VISrl1': 2414, 'SSp-tr1': 1471, 'RSPagl1': 788, 'VISa1': 774, 'RSPd1': 259, 'VISal1': 249, 'VISam1': 70, 'SSp-ul1': 51, 'SSp-ll1': 22}
+
+3. Comparing results...
+   MesoscopeSession method: 11393 neurons
+   Brain_Regions.py method: 11393 neurons
+   Perfect matches: 11393/11393 (100.0%)
+✅ PERFECT ALIGNMENT: All region labels match!
+
+Region counts:
+   VISp1: 2856
+   SSp-bfd1: 2439
+   VISrl1: 2414
+   SSp-tr1: 1471
+   RSPagl1: 788
+   VISa1: 774
+   RSPd1: 259
+   VISal1: 249
+   VISam1: 70
+   SSp-ul1: 51
+   SSp-ll1: 22
+
+🎉 SUCCESS: Region labels are perfectly aligned!
+You can now use 'regions_5ea6bb9b-6163-4e8a-816b-efe7002666b0_validation.csv' for unit embedding visualization
