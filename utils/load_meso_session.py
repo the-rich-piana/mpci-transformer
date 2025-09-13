@@ -7,13 +7,13 @@ import h5py
 import os
 import brainbox.behavior.wheel as wh
 
-
+from scipy import ndimage
 class FOVData(BaseModel):
     """Data for a single Field of View (FOV)"""
     fov_name: str
     collection: str
     neuropil_activity: Optional[np.ndarray] = Field(None, description="Neuropil activity matrix [frames, ROIs]")    
-    roi_activity: np.ndarray = Field(..., description="ROI activity matrix [frames, ROIs]")
+    roi_activity: np.ndarray = Field(..., description="ROI activity matrix [frames, ROIs], this contains every ROI in the field of view.")
     timestamps: np.ndarray = Field(..., description="Timestamps for each frame")
     bad_frames: np.ndarray = Field(..., description="Boolean array marking bad frames")
     frame_qc: np.ndarray = Field(..., description="QC values for frames")
@@ -88,49 +88,99 @@ class FOVData(BaseModel):
             raise ValueError(f"Neuropil activity not available for {self.fov_name}")
             
         # Suite2p ΔF/F calculation
-        f_corrected = self.roi_activity - neucoeff * self.neuropil_activity
+        f_corrected = self.roi_activity - neucoeff * self.neuropil_activity 
         
-        # Compute baseline (using simple percentile method)
-        # You can make this more sophisticated later
+        # # Compute baseline (using simple percentile method)
+        # # You can make this more sophisticated later
         f0 = np.percentile(f_corrected, 10, axis=0, keepdims=True)
         f0 = np.maximum(f0, 1.0)  # Avoid division by very small numbers
-        
-        # Calculate ΔF/F
+
+        # # import pandas as pd
+        # f0 = pd.DataFrame(f_corrected).rolling(window=180*5, center=True, min_periods=1).quantile(0.1).values
+
+        # # Calculate ΔF/F
         dff = (f_corrected - f0) / f0
+        
+        # print("RETURNING PURE SUITE2P METHOD")
+        # dff = f_corrected
         
         return dff
     
-    def get_dff_activity(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
-        """Get ΔF/F activity filtered by good frames and time window"""
+    def get_fov_dff_activity(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get ΔF/F activity only for neurons, filtered by good frames and time window"""
+        # Check if any frames are bad - raise exception if so
+        if not np.all(self.good_frame_mask):
+            raise ValueError("Bad frames detected in FOV data. All frames must be good.")
+        
         # Compute ΔF/F
         dff_activity = self.compute_dff(neucoeff=neucoeff)
         
-        # Filter by good frames
-        good_mask = self.good_frame_mask
-        filtered_dff = dff_activity[good_mask, :]
-        filtered_timestamps = self.timestamps[good_mask]
-        
-        # Apply time window if specified
+        # Apply time window filter if specified
+        filtered_timestamps = self.timestamps
         if time_window is not None:
             time_limit = filtered_timestamps[0] + time_window
             time_mask = filtered_timestamps <= time_limit
-            filtered_dff = filtered_dff[time_mask, :]
+            dff_activity = dff_activity[time_mask, :]
             filtered_timestamps = filtered_timestamps[time_mask]
-            
-        return filtered_dff, filtered_timestamps
+        
+        # Filter by ROI type to get only neurons
+        neuron_mask = np.array(self.roi_types) == 1
+        activity_matrix = dff_activity[:, neuron_mask]
+        
+        return activity_matrix, filtered_timestamps, neuron_mask
+    def get_fov_fluorescence(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get fluorescence  only for neurons, filtered by good frames and time window"""
+        # Check if any frames are bad - raise exception if so
+        if not np.all(self.good_frame_mask):
+            raise ValueError("Bad frames detected in FOV data. All frames must be good.")
+        
+        fluor = self.roi_activity
+        # Apply time window filter if specified
+        filtered_timestamps = self.timestamps
+        if time_window is not None:
+            time_limit = filtered_timestamps[0] + time_window
+            time_mask = filtered_timestamps <= time_limit
+            fluor = fluor[time_mask, :]
+            filtered_timestamps = filtered_timestamps[time_mask]
+        
+        # Filter by ROI type to get only neurons
+        neuron_mask = np.array(self.roi_types) == 1
+        fluor = fluor[:, neuron_mask]
+        
+        return fluor, filtered_timestamps, neuron_mask
     
-    def get_neuron_dff_activity(self, time_window: Optional[float] = None, neucoeff: float = 0.7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get ΔF/F activity only for neurons, filtered by good frames and time window"""
-        filtered_dff, filtered_timestamps = self.get_dff_activity(time_window, neucoeff)
+    def get_fov_pseudo_firing(self, window_size: int = 7, center: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get pseudo firing rates from sparse deconvolved traces using rolling average.
         
-        # Filter by ROI type
-        if self.roi_types is not None:
-            neuron_mask = np.array(self.roi_types) == 1
-            neuron_dff = filtered_dff[:, neuron_mask]
-            return neuron_dff, filtered_timestamps, neuron_mask
+        Args:
+            window_size: Number of time bins for rolling average (default 5 ≈ 1 second at 4.9Hz)
+            center: Whether to center the rolling window
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray, np.ndarray]: (pseudo_firing_rates, timestamps, neuron_mask)
+        """
+        # Get sparse deconvolved traces
+        deconvolved_traces = self.roi_activity
         
-        # If no ROI types available, return empty arrays
-        return np.array([]).reshape(filtered_dff.shape[0], 0), filtered_timestamps, np.array([])
+        # Filter to only get neurons
+        neuron_mask = np.array(self.roi_types) == 1
+        deconvolved_traces = deconvolved_traces[:, neuron_mask]
+        
+        # Apply rolling window average using scipy's uniform filter
+        # This creates pseudo firing rates by smoothing sparse events
+        pseudo_firing_rates = np.zeros_like(deconvolved_traces)
+        
+        for neuron_idx in range(deconvolved_traces.shape[1]):
+            # Apply 1D uniform filter along time axis for each neuron
+            pseudo_firing_rates[:, neuron_idx] = ndimage.uniform_filter1d(
+                deconvolved_traces[:, neuron_idx].astype(float),
+                size=window_size,
+                mode='nearest'  # Handle edges by extending nearest values
+            )
+        
+        return pseudo_firing_rates, self.timestamps, neuron_mask
+
 
 class MesoscopeSession(BaseModel):
     """Data for a complete mesoscope session with multiple FOVs"""
@@ -474,42 +524,120 @@ class MesoscopeSession(BaseModel):
             Tuple[np.ndarray, np.ndarray]: (dff_matrix, timestamps)
         """
         # List to store neuron ΔF/F from each FOV
-        all_neuron_dff = []
+        all_fov_dff_activity = []
         common_timestamps = None
         
         # Process each FOV
         for fov_name, fov in self.fovs.items():
             # Get neuron ΔF/F activity
-            neuron_dff, timestamps, _ = fov.get_neuron_dff_activity(time_window, neucoeff)
+            fov_dff_activity, timestamps, _ = fov.get_fov_dff_activity(time_window, neucoeff)
             
-            # Skip if no neurons
-            if neuron_dff.shape[1] == 0:
-                continue
-                
-            # Store the neuron ΔF/F
-            all_neuron_dff.append(neuron_dff)
+            # Store the ΔF/F matrix
+            all_fov_dff_activity.append(fov_dff_activity)
+            
+            # Store the timestamps
+            if common_timestamps is None and timestamps.size > 0:
+                common_timestamps = timestamps
+
+        if not all_fov_dff_activity or common_timestamps is None:
+            raise ValueError("no valid FOVs")
+        
+        # Verify all activities have the same number of time points
+        expected_time_points = all_fov_dff_activity[0].shape[0]
+        all_fov_dff_activity = [act for act in all_fov_dff_activity 
+                         if act.shape[0] == expected_time_points]
+        
+        # Combine all neuron activities into a single matrix
+        if all_fov_dff_activity:
+            # Concatenate along the neuron dimension (axis=1)
+            combined_dff = np.concatenate(all_fov_dff_activity, axis=1)
+            return combined_dff, common_timestamps
+        
+        return np.array([]), common_timestamps
+    
+    def get_fluor_activity_matrix(self, time_window: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get a combined fluorescence matrix of all neuron activity across all FOVs
+        
+        Args:
+            time_window: Time window to extract (in seconds)
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (fluorescence_matrix, timestamps)
+        """
+        # List to store neuron fluorescence from each FOV
+        all_fov_fluor_activity = []
+        common_timestamps = None
+        
+        # Process each FOV
+        for fov_name, fov in self.fovs.items():
+            # Get neuron fluorescence activity
+            fov_fluor_activity, timestamps, _ = fov.get_fov_fluorescence(time_window)
+            
+            # Store the fluorescence matrix
+            all_fov_fluor_activity.append(fov_fluor_activity)
             
             # Store the timestamps
             if common_timestamps is None and timestamps.size > 0:
                 common_timestamps = timestamps
         
-        # If no valid FOVs, return empty arrays
-        if not all_neuron_dff or common_timestamps is None:
-            return np.array([]), np.array([])
+        # If no valid FOVs, raise exception
+        if not all_fov_fluor_activity or common_timestamps is None:
+            raise ValueError("No valid FOVs found for fluorescence activity")
         
         # Verify all activities have the same number of time points
-        expected_time_points = all_neuron_dff[0].shape[0]
-        all_neuron_dff = [act for act in all_neuron_dff 
-                         if act.shape[0] == expected_time_points]
+        expected_time_points = all_fov_fluor_activity[0].shape[0]
+        all_fov_fluor_activity = [act for act in all_fov_fluor_activity 
+                                 if act.shape[0] == expected_time_points]
         
         # Combine all neuron activities into a single matrix
-        if all_neuron_dff:
+        if all_fov_fluor_activity:
             # Concatenate along the neuron dimension (axis=1)
-            combined_dff = np.concatenate(all_neuron_dff, axis=1)
-            return combined_dff, common_timestamps
+            combined_fluor = np.concatenate(all_fov_fluor_activity, axis=1)
+            return combined_fluor, common_timestamps
         
-        return np.array([]), common_timestamps
+        raise ValueError("No valid FOV data with matching time points")
     
+    
+    def get_pseudo_activity_matrix(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get a combined pseudo activity matrix of all neuron activity across all FOVs
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (fluorescence_matrix, timestamps)
+        """
+        # List to store neuron fluorescence from each FOV
+        all_fov_pseudo_activity = []
+        common_timestamps = None
+        
+        # Process each FOV
+        for fov_name, fov in self.fovs.items():
+            # Get neuron fluorescence activity
+            fov_pseudo_activity, timestamps, _ = fov.get_fov_pseudo_firing()
+            
+            # Store the fluorescence matrix
+            all_fov_pseudo_activity.append(fov_pseudo_activity)
+            
+            # Store the timestamps
+            if common_timestamps is None and timestamps.size > 0:
+                common_timestamps = timestamps
+        
+        # If no valid FOVs, raise exception
+        if not all_fov_pseudo_activity or common_timestamps is None:
+            raise ValueError("No valid FOVs found for pseudo activity")
+        
+        # Verify all activities have the same number of time points
+        expected_time_points = all_fov_pseudo_activity[0].shape[0]
+        all_fov_pseudo_activity = [act for act in all_fov_pseudo_activity 
+                                 if act.shape[0] == expected_time_points]
+        
+        # Combine all neuron activities into a single matrix
+        if all_fov_pseudo_activity:
+            # Concatenate along the neuron dimension (axis=1)
+            combined_fluor = np.concatenate(all_fov_pseudo_activity, axis=1)
+            return combined_fluor, common_timestamps
+        
+        raise ValueError("No valid FOV data with matching time points")    
 
 # Helper functions
 def _calculate_duration(session_info) -> Tuple[float, float]:
@@ -539,7 +667,7 @@ def _calculate_duration(session_info) -> Tuple[float, float]:
     return 0.0
 
 
-def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> Optional[FOVData]:
+def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> FOVData:
     """Load data for a single FOV"""
     try:
         # Load the key datasets
@@ -549,22 +677,13 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
             roi_activity = one.load_dataset(eid, 'mpci.ROIActivityDeconvolved', collection=collection)
         
         # Load neuropil activity
-        neuropil_activity = None
-        try:
-            neuropil_activity = one.load_dataset(eid, 'mpci.ROINeuropilActivityF', collection=collection)
-        except Exception as e:
-            print(f"Warning: Could not load neuropil activity for {collection}: {e}")
-            
+        neuropil_activity = one.load_dataset(eid, 'mpci.ROINeuropilActivityF', collection=collection)    
         timestamps = one.load_dataset(eid, 'mpci.times', collection=collection)
         bad_frames = one.load_dataset(eid, 'mpci.badFrames', collection=collection)
         frame_qc = one.load_dataset(eid, 'mpci.mpciFrameQC', collection=collection)
         
         # Try to load ROI types
-        roi_types = None
-        try:
-            roi_types = one.load_dataset(eid, 'mpciROIs.mpciROITypes', collection=collection)
-        except Exception:
-            pass
+        roi_types = one.load_dataset(eid, 'mpciROIs.mpciROITypes', collection=collection)
         
         # Try to load brain locations
         brain_locations = None
@@ -588,4 +707,3 @@ def _load_fov_data(one: ONE, eid: str, raw_activity: bool, collection: str) -> O
         )
     except Exception as e:
         print(f"Error loading FOV data for {collection}: {str(e)}")
-        return None

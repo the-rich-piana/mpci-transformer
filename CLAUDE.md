@@ -98,12 +98,6 @@ trial_intervals = session.intervals
 wheel_vel = session.wheel_velocity
 ```
 
-### Model Training
-Primary model training is done in Jupyter notebooks in `3_MODELLING/`:
-- `7_2_informer.ipynb`: Main Informer implementation
-- Training uses PyTorch with custom loss functions for neural spike detection
-- Models saved to `3_MODELLING/informer_calcium_model/`
-
 ### Data Preprocessing Pipeline
 The `CalciumDataPreprocessor` class provides a complete preprocessing pipeline:
 
